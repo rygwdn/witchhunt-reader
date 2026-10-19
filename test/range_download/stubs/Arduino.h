@@ -16,13 +16,9 @@ inline unsigned long& fakeNow() {
 inline unsigned long millis() { return fakeNow(); }
 inline void delay(unsigned long ms) { fakeNow() += ms; }
 
-class String {
- public:
-  String(const char* s = "") : s_(s) {}
-  const char* c_str() const { return s_.c_str(); }
+#include <WString.h>
+#include <Print.h>
 
- private:
-  std::string s_;
-};
+class Stream : public Print {};
 
 class IPAddress {};

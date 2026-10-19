@@ -4,7 +4,8 @@
 #include <functional>
 #include <memory>
 #include <string>
-
+#include <utility>
+#include <vector>
 /**
  * HTTP client utility for fetching content and downloading files. Built on the
  * wolfSSL-backed SecureNet stack: https is verified against the curated
@@ -19,6 +20,9 @@ class HttpDownloader {
   using ProgressCallback = std::function<bool(unsigned int downloaded, unsigned int total)>;
   // Called with each response chunk as it arrives; return false to abort.
   using DataCallback = std::function<bool(const uint8_t* data, size_t len)>;
+  // Extra request headers for a single transfer. Needed for header-authenticated
+  // endpoints (KOReader-style x-auth-user/x-auth-key), which Basic auth cannot express.
+  using HeaderList = std::vector<std::pair<std::string, std::string>>;
 
   // Asked with each redirect's target URL before it is followed; false fails the transfer at the
   // 3xx (HTTP_ERROR). For fetching on behalf of something whose reach is fenced to an allowlist.
@@ -142,6 +146,12 @@ class HttpDownloader {
                                       const RedirectFilter& redirectAllowed = {});
 
   /**
+   * Download a file to the SD card with extra request headers.
+   */
+  static DownloadError downloadToFile(const std::string& url, const std::string& destPath, const HeaderList& headers,
+                                      ProgressCallback progress = nullptr, TlsPolicy tls = TlsPolicy::Verified);
+
+  /**
    * Session-based variant. The first call on a fresh session opens the
    * connection (TLS handshake, cert verification, etc.); subsequent calls to
    * URLs on the same host reuse the open client and skip the handshake.
@@ -149,4 +159,12 @@ class HttpDownloader {
   static DownloadError downloadToFile(Session& session, const std::string& url, const std::string& destPath,
                                       ProgressCallback progress = nullptr, const std::string& username = "",
                                       const std::string& password = "", TlsPolicy tls = TlsPolicy::Verified);
+
+  /**
+   * Session-based download with extra request headers. Use this for a group of
+   * same-host requests that authenticate with headers rather than Basic auth.
+   */
+  static DownloadError downloadToFile(Session& session, const std::string& url, const std::string& destPath,
+                                      const HeaderList& headers, ProgressCallback progress = nullptr,
+                                      TlsPolicy tls = TlsPolicy::Verified);
 };

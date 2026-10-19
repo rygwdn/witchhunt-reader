@@ -450,7 +450,13 @@ int SecureHttpClient::request(const char* method, const std::string& url, const 
     _body.append(reinterpret_cast<const char*>(d), n);
     return true;
   };
+  return request(method, url, body, sink);
+}
 
+int SecureHttpClient::request(const char* method, const std::string& url, const std::string& body,
+                              const BodySink& sink, const ProgressFn& progress) {
+  // Preserve reusable capacity from prior buffered responses.
+  _body.clear();
   std::string current = url;
   std::string activeMethod = method;
   std::string activeBody = body;
@@ -469,11 +475,8 @@ int SecureHttpClient::request(const char* method, const std::string& url, const 
     noteResponse(meta, current);
 
     if (isRedirect(meta.status) && !meta.location.empty()) {
-      // See get(): drain to keep the socket usable, close on a failed drain.
       if (readBody(nullptr, nullptr, meta.contentLength, meta.chunked, meta.keepAlive) < 0 || !meta.keepAlive) close();
       current = resolveRedirect(u, meta.location);
-      // Refuse to drop TLS silently: stop following a https -> http downgrade
-      // and surface the 3xx to the caller (setAllowRedirectDowngrade opts in).
       Url next;
       if (u.https() && !_allowRedirectDowngrade && parseUrl(current, next) && !next.https()) return meta.status;
       if (_redirectFilter && !_redirectFilter(current)) return meta.status;
@@ -487,14 +490,11 @@ int SecureHttpClient::request(const char* method, const std::string& url, const 
       continue;
     }
 
-    const int rc = readBody(sink, nullptr, meta.contentLength, meta.chunked, meta.keepAlive);
+    const int rc = readBody(sink, progress, meta.contentLength, meta.chunked, meta.keepAlive);
     if (rc < 0) {
-      // Undrained body bytes would poison the kept-alive socket: the next
-      // request would parse the leftovers as its status line.
       close();
       return rc;
     }
-    // A close-delimited body (no framing) ends WITH the connection; never keep it.
     if (!meta.keepAlive || (meta.contentLength < 0 && !meta.chunked)) close();
     return meta.status;
   }

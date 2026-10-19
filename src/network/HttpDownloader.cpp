@@ -2,7 +2,6 @@
 
 #include <Arduino.h>
 #include <CrossPointRoots.h>
-#include <FileReplace.h>
 #include <HalClock.h>
 #include <Logging.h>
 #include <RangeDownload.h>
@@ -10,6 +9,8 @@
 #include <base64.h>
 #include <esp_heap_caps.h>
 #include <esp_wifi.h>
+
+#include <Memory.h>
 
 #include <cstdint>
 #include <cstring>
@@ -35,12 +36,8 @@ std::string extractHostFromUrl(const std::string& url) {
   if (hostEnd == std::string::npos) hostEnd = url.size();
   return url.substr(hostStart, hostEnd - hostStart);
 }
-
-// Clock guard for TLS. The plausibility window and the SNTP retry policy now live in
-// HalClock (isPlausibleForTls / ensureUsableForTls) so every TLS entry point shares one rule —
-// this used to be a private copy here, which is why the KOReader paths never got it. Returns
-// whether full certificate date validation is possible; false means the caller should tolerate
-// date errors (and only date errors) for this request.
+// Clock guard for TLS. The plausibility window and the SNTP retry policy live in
+// HalClock so every TLS entry point shares one rule.
 bool ensureClockForTls() { return HalClock::ensureUsableForTls(SETTINGS.ntpServer); }
 
 // Per-request timeout handed to SecureHttpClient::setTimeout(). 60s gives slow
@@ -116,7 +113,8 @@ size_t largestFreeBlock() { return heap_caps_get_largest_free_block(MALLOC_CAP_D
 // peer fails to verify.
 HttpDownloader::DownloadError runGetSecure(const std::string& url, const std::string& username,
                                            const std::string& password, Sink& sink, HttpDownloader::TlsPolicy tls,
-                                           const HttpDownloader::RedirectFilter& redirectAllowed) {
+                                           const HttpDownloader::RedirectFilter& redirectAllowed,
+                                           const HttpDownloader::HeaderList* headers) {
   const WifiPowerSaveGuard psGuard;
   const bool clockReady = logPreCallContext(url);
   const unsigned long startMs = millis();
@@ -136,6 +134,11 @@ HttpDownloader::DownloadError runGetSecure(const std::string& url, const std::st
     http.setBasicAuth(username, password);
   }
   if (redirectAllowed) http.setRedirectFilter(redirectAllowed);
+  if (headers) {
+    for (const auto& [name, value] : *headers) {
+      http.addHeader(name, value);
+    }
+  }
 
   bool openLogged = false;
   const auto write = sink.write;
@@ -177,8 +180,9 @@ HttpDownloader::DownloadError runGetSecure(const std::string& url, const std::st
 // files, or fetch public data pass their own.
 HttpDownloader::DownloadError runGetDispatch(const std::string& url, const std::string& username,
                                              const std::string& password, Sink& sink, HttpDownloader::TlsPolicy tls,
-                                             const HttpDownloader::RedirectFilter& redirectAllowed = {}) {
-  return runGetSecure(url, username, password, sink, tls, redirectAllowed);
+                                             const HttpDownloader::RedirectFilter& redirectAllowed = {},
+                                             const HttpDownloader::HeaderList* headers = nullptr) {
+  return runGetSecure(url, username, password, sink, tls, redirectAllowed, headers);
 }
 }  // namespace
 
@@ -189,13 +193,15 @@ struct HttpDownloader::Session::Impl {
   // open SecureClient when host/port match), so the Session just owns one
   // persistent SecureHttpClient across downloadToFile(session, ...) calls.
   std::unique_ptr<crosspoint::SecureHttpClient> http;
-  bool preCallLogged = false;
   // What this session's files learn about chunked downloads (RangeDownload.h): a chunk size that ran
   // out of memory stays out of reach, so later files start at a size that worked.
   crosspoint::ChunkSession chunking;
 };
 
-HttpDownloader::Session::Session() : impl_(std::make_unique<Impl>()) {}
+HttpDownloader::Session::Session() : impl_(makeUniqueNoThrow<Impl>()) {
+  if (!impl_) LOG_ERR("HTTP", "Unable to allocate session (%u bytes)", static_cast<unsigned>(sizeof(Impl)));
+}
+
 HttpDownloader::Session::~Session() = default;
 
 namespace {
@@ -206,14 +212,24 @@ namespace {
 // heap win). Cross-host requests transparently reopen inside SecureHttpClient.
 HttpDownloader::DownloadError runGetSecureOnSession(HttpDownloader::Session& session, const std::string& url,
                                                     const std::string& username, const std::string& password,
-                                                    Sink& sink, HttpDownloader::TlsPolicy tls) {
+                                                    Sink& sink, HttpDownloader::TlsPolicy tls,
+                                                    const HttpDownloader::HeaderList* headers) {
   const WifiPowerSaveGuard psGuard;
   auto* impl = session.impl();
-  // Evaluated on every call, not just when the session is created: a session opened before the
-  // clock was set must not keep that verdict for the rest of its life (nor the reverse).
+  if (!impl) {
+    LOG_ERR("HTTP", "Persistent session allocation unavailable");
+    return HttpDownloader::FILE_ERROR;
+  }
+  // Re-evaluate TLS clock readiness for every request; a session outlives any one verdict.
   const bool clockReady = logPreCallContext(url);
   if (!impl->http) {
-    impl->http = std::make_unique<crosspoint::SecureHttpClient>();
+    // The TLS client owns handshake state and stays alive across transfers; keep it off the small task stack.
+    impl->http = makeUniqueNoThrow<crosspoint::SecureHttpClient>();
+    if (!impl->http) {
+      LOG_ERR("HTTP", "Unable to allocate secure client (%u bytes)",
+              static_cast<unsigned>(sizeof(crosspoint::SecureHttpClient)));
+      return HttpDownloader::FILE_ERROR;
+    }
     impl->http->setTimeout(HTTP_TIMEOUT_MS);
     impl->http->setUserAgent("WitchReader-ESP32-" CROSSPOINT_VERSION);
   }
@@ -223,10 +239,13 @@ HttpDownloader::DownloadError runGetSecureOnSession(HttpDownloader::Session& ses
   impl->http->setAllowInsecureFallback(false);
   impl->http->setAllowCertificateDateErrors(!clockReady);
   impl->http->clearHeaders();
-  // Unconditionally, so a file without credentials does not inherit the previous one's
-  // (sendRequest() leaves basic auth out unless both are set).
+  // A reused session must not carry Basic credentials into a header-authenticated request.
   impl->http->setBasicAuth(username, password);
-
+  if (headers) {
+    for (const auto& [name, value] : *headers) {
+      impl->http->addHeader(name, value);
+    }
+  }
   const int rc = crosspoint::downloadToSink(*impl->http, url, sink, impl->chunking, &largestFreeBlock);
   if (rc == crosspoint::SecureHttpClient::ERR_ABORTED) return HttpDownloader::ABORTED;
   if (rc == crosspoint::ERR_REWIND) return HttpDownloader::FILE_ERROR;
@@ -239,8 +258,9 @@ HttpDownloader::DownloadError runGetSecureOnSession(HttpDownloader::Session& ses
 
 HttpDownloader::DownloadError runGetOnSession(HttpDownloader::Session& session, const std::string& url,
                                               const std::string& username, const std::string& password, Sink& sink,
-                                              HttpDownloader::TlsPolicy tls) {
-  return runGetSecureOnSession(session, url, username, password, sink, tls);
+                                              HttpDownloader::TlsPolicy tls,
+                                              const HttpDownloader::HeaderList* headers = nullptr) {
+  return runGetSecureOnSession(session, url, username, password, sink, tls, headers);
 }
 }  // namespace
 
@@ -322,35 +342,67 @@ namespace {
 // From CrossInk commit 1d954ae34 ("preserve existing books during OPDS downloads", Julia Nguyen),
 // which stages OPDS downloads as .part files; doing it here for every download is ours.
 std::string partPathFor(const std::string& destPath) { return destPath + ".part"; }
+std::string backupPathFor(const std::string& destPath) { return destPath + ".bak"; }
 
-// Common file-sink plumbing used by both downloadToFile overloads.
+bool removeStagedDownload(const std::string& partPath) {
+  if (!Storage.exists(partPath.c_str()) || Storage.remove(partPath.c_str())) return true;
+  LOG_ERR("HTTP", "Failed to remove incomplete download %s", partPath.c_str());
+  return false;
+}
+
+bool recoverDownloadDestination(const std::string& destPath, const std::string& backupPath) {
+  // A backup-only state is an interrupted publish to roll back; live plus backup means cleanup remained after publish.
+  if (!Storage.exists(backupPath.c_str())) return true;
+  if (Storage.exists(destPath.c_str())) {
+    if (Storage.remove(backupPath.c_str())) return true;
+    LOG_ERR("HTTP", "Failed to clear prior download backup %s", backupPath.c_str());
+    return false;
+  }
+  if (Storage.rename(backupPath.c_str(), destPath.c_str())) return true;
+  LOG_ERR("HTTP", "Failed to restore %s from %s", destPath.c_str(), backupPath.c_str());
+  return false;
+}
+
+void restoreFailedDownloadPublication(const std::string& destPath, const std::string& backupPath) {
+  if (!Storage.exists(backupPath.c_str())) return;
+  if (Storage.exists(destPath.c_str())) {
+    LOG_ERR("HTTP", "Previous download remains at recovery path %s", backupPath.c_str());
+    return;
+  }
+  if (!Storage.rename(backupPath.c_str(), destPath.c_str())) {
+    LOG_ERR("HTTP", "Previous download remains at recovery path %s", backupPath.c_str());
+  }
+}
+
+// Common file-sink plumbing used by all downloadToFile overloads.
 HttpDownloader::DownloadError finishFileDownload(HttpDownloader::DownloadError result, const std::string& destPath,
                                                  FsFile& file, size_t downloaded) {
   const std::string partPath = partPathFor(destPath);
-  // Flush before any remove() on the same path; DESTRUCTOR_CLOSES_FILE would
-  // otherwise close only after the remove.
+  const std::string backupPath = backupPathFor(destPath);
   file.flush();
   const bool closed = file.close();
   if (result != HttpDownloader::OK) {
-    Storage.remove(partPath.c_str());
+    removeStagedDownload(partPath);
     return result;
   }
   if (downloaded == 0) {
     LOG_ERR("HTTP", "no data received");
-    Storage.remove(partPath.c_str());
+    removeStagedDownload(partPath);
     return HttpDownloader::HTTP_ERROR;
   }
   if (!closed) {
     LOG_ERR("HTTP", "Failed to finish writing %s", partPath.c_str());
-    Storage.remove(partPath.c_str());
+    removeStagedDownload(partPath);
     return HttpDownloader::FILE_ERROR;
   }
-  // The file it replaces steps aside until the download is in its place, and comes back if it
-  // cannot be; it used to be removed first, and was lost when the rename then failed.
-  if (!FileReplace::replace(partPath.c_str(), destPath.c_str())) {
-    LOG_ERR("HTTP", "Failed to move %s into place", partPath.c_str());
-    Storage.remove(partPath.c_str());
+  if (!Storage.publishStagedFileWithBackup(partPath.c_str(), destPath.c_str(), backupPath.c_str())) {
+    LOG_ERR("HTTP", "Failed to publish %s to %s", partPath.c_str(), destPath.c_str());
+    restoreFailedDownloadPublication(destPath, backupPath);
+    removeStagedDownload(partPath);
     return HttpDownloader::FILE_ERROR;
+  }
+  if (Storage.exists(backupPath.c_str()) && !Storage.remove(backupPath.c_str())) {
+    LOG_ERR("HTTP", "Published %s but could not remove prior version %s", destPath.c_str(), backupPath.c_str());
   }
   LOG_DBG("HTTP", "Downloaded %zu bytes", downloaded);
   return HttpDownloader::OK;
@@ -365,6 +417,8 @@ HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& 
   LOG_DBG("HTTP", "Destination: %s", destPath.c_str());
 
   const std::string partPath = partPathFor(destPath);
+  const std::string backupPath = backupPathFor(destPath);
+  if (!recoverDownloadDestination(destPath, backupPath)) return FILE_ERROR;
   FsFile file;
   if (!Storage.openFileForWrite("HTTP", partPath.c_str(), file)) {
     LOG_ERR("HTTP", "Failed to open file for writing: %s", partPath.c_str());
@@ -384,6 +438,32 @@ HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& 
   return finishFileDownload(result, destPath, file, sink.downloaded);
 }
 
+HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& url, const std::string& destPath,
+                                                             const HeaderList& headers, ProgressCallback progress,
+                                                             TlsPolicy tls) {
+  LOG_DBG("HTTP", "Downloading: %s", url.c_str());
+  LOG_DBG("HTTP", "Destination: %s", destPath.c_str());
+
+  const std::string partPath = partPathFor(destPath);
+  const std::string backupPath = backupPathFor(destPath);
+  if (!recoverDownloadDestination(destPath, backupPath)) return FILE_ERROR;
+  FsFile file;
+  if (!Storage.openFileForWrite("HTTP", partPath.c_str(), file)) {
+    LOG_ERR("HTTP", "Failed to open file for writing: %s", partPath.c_str());
+    return FILE_ERROR;
+  }
+  Sink sink;
+  sink.progress = std::move(progress);
+  sink.write = [&file](const uint8_t* data, size_t len) { return file.write(data, len) == len; };
+  // Reopening for write truncates: the file starts again from byte 0.
+  sink.rewind = [&file, &partPath]() {
+    file.close();
+    return Storage.openFileForWrite("HTTP", partPath.c_str(), file);
+  };
+  const DownloadError result = runGetDispatch(url, "", "", sink, tls, {}, &headers);
+  return finishFileDownload(result, destPath, file, sink.downloaded);
+}
+
 HttpDownloader::DownloadError HttpDownloader::downloadToFile(Session& session, const std::string& url,
                                                              const std::string& destPath, ProgressCallback progress,
                                                              const std::string& username, const std::string& password,
@@ -392,6 +472,8 @@ HttpDownloader::DownloadError HttpDownloader::downloadToFile(Session& session, c
   LOG_DBG("HTTP", "Destination: %s", destPath.c_str());
 
   const std::string partPath = partPathFor(destPath);
+  const std::string backupPath = backupPathFor(destPath);
+  if (!recoverDownloadDestination(destPath, backupPath)) return FILE_ERROR;
   FsFile file;
   if (!Storage.openFileForWrite("HTTP", partPath.c_str(), file)) {
     LOG_ERR("HTTP", "Failed to open file for writing: %s", partPath.c_str());
@@ -408,5 +490,32 @@ HttpDownloader::DownloadError HttpDownloader::downloadToFile(Session& session, c
   };
 
   const DownloadError result = runGetOnSession(session, url, username, password, sink, tls);
+  return finishFileDownload(result, destPath, file, sink.downloaded);
+}
+
+HttpDownloader::DownloadError HttpDownloader::downloadToFile(Session& session, const std::string& url,
+                                                             const std::string& destPath, const HeaderList& headers,
+                                                             ProgressCallback progress, TlsPolicy tls) {
+  LOG_DBG("HTTP", "Downloading (session): %s", url.c_str());
+  LOG_DBG("HTTP", "Destination: %s", destPath.c_str());
+
+  const std::string partPath = partPathFor(destPath);
+  const std::string backupPath = backupPathFor(destPath);
+  if (!recoverDownloadDestination(destPath, backupPath)) return FILE_ERROR;
+  FsFile file;
+  if (!Storage.openFileForWrite("HTTP", partPath.c_str(), file)) {
+    LOG_ERR("HTTP", "Failed to open file for writing: %s", partPath.c_str());
+    return FILE_ERROR;
+  }
+
+  Sink sink;
+  sink.progress = std::move(progress);
+  sink.write = [&file](const uint8_t* data, size_t len) { return file.write(data, len) == len; };
+  sink.rewind = [&file, &partPath]() {
+    file.close();
+    return Storage.openFileForWrite("HTTP", partPath.c_str(), file);
+  };
+
+  const DownloadError result = runGetOnSession(session, url, "", "", sink, tls, &headers);
   return finishFileDownload(result, destPath, file, sink.downloaded);
 }

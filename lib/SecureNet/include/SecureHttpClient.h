@@ -113,6 +113,10 @@ class SecureHttpClient {
   int GET(const std::string& url) { return request("GET", url); }
   int POST(const std::string& url, const std::string& body) { return request("POST", url, body); }
   int PUT(const std::string& url, const std::string& body) { return request("PUT", url, body); }
+  // Body-sink request: POST/PUT response bytes are delivered as framed chunks,
+  // without accumulating the response in getBody().
+  int request(const char* method, const std::string& url, const std::string& body, const BodySink& sink,
+              const ProgressFn& progress = nullptr);
 
   const std::string& getBody() const { return _body; }
   bool bodyTruncated() const { return _bodyTruncated; }

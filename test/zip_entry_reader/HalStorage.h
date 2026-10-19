@@ -21,6 +21,7 @@
 #include "Arduino.h"
 #include "Print.h"
 #include "WString.h"
+#include "StagedFileReplace.h"
 
 class HalFile : public Print {
  public:
@@ -139,13 +140,16 @@ class HalFile : public Print {
     if (!std::filesystem::is_directory(path, ec) || ec) return false;
     isDir_ = true;
     for (const auto& e : std::filesystem::directory_iterator(path, ec)) {
-      DirEntry entry{e.path().filename().string(), e.is_directory()};
+      DirEntry entry{};
+      entry.name = e.path().filename().string();
+      entry.isDir = e.is_directory();
       if (!entry.isDir) {
         std::error_code sizeError;
         entry.size = static_cast<uint64_t>(std::filesystem::file_size(e.path(), sizeError));
       }
       fatStamp(e.path(), entry.fatDate, entry.fatTime);  // a folder's entry carries a date too
       entries_.push_back(std::move(entry));
+      entries_.back().path = e.path().string();
     }
     std::sort(entries_.begin(), entries_.end(), [](const DirEntry& a, const DirEntry& b) { return a.name < b.name; });
     return true;
@@ -283,12 +287,12 @@ class HalFile : public Print {
   bool getCreateDateTime(uint16_t* pdate, uint16_t* ptime) { return getModifyDateTime(pdate, ptime); }
   bool isDirectory() const { return isDir_; }
   void rewindDirectory() { next_ = 0; }
-  // One entry per call, exhausted-directory returns a falsy handle. Only the
-  // name and the directory flag are populated — that is all a scan reads.
+  // One opened entry per call, exhausted-directory returns a falsy handle.
   HalFile openNextFile() {
     HalFile f;
     if (next_ >= entries_.size()) return f;
     const DirEntry& e = entries_[next_++];
+    if (!e.isDir) f.openForRead(e.path);
     f.hasImpl_ = true;
     f.hasName_ = true;
     f.name_ = e.name;
@@ -334,8 +338,8 @@ class HalFile : public Print {
     uint64_t size = 0;
     uint16_t fatDate = 0;
     uint16_t fatTime = 0;
+    std::string path;
   };
-
   FILE* fp_ = nullptr;
   bool hasImpl_ = false;
   bool isDir_ = false;
@@ -352,16 +356,17 @@ using FsFile = HalFile;
 
 class HalStorage {
  public:
-  bool openFileForRead(const char*, const std::string& path, HalFile& f) { return f.openForRead(path); }
-  bool openFileForRead(const char*, const char* path, HalFile& f) { return f.openForRead(path); }
-  bool openFileForWrite(const char*, const std::string& path, HalFile& f) { return f.openForWrite(path); }
-  bool openFileForWrite(const char*, const char* path, HalFile& f) { return f.openForWrite(path); }
-  bool openFileForUpdate(const char*, const std::string& path, HalFile& f) { return f.openForUpdate(path); }
-  bool openFileForUpdate(const char*, const char* path, HalFile& f) { return f.openForUpdate(path); }
-  bool exists(const char* path) { return std::filesystem::exists(path); }
   // The device counts the firmware's own writes, for caches keyed on the card's contents; a host
   // test changes its tree between runs, not under a cache.
   uint32_t contentGeneration() const { return 0; }
+  void setCrosspointRoot(const std::string& root) { crosspointRoot_ = root; }
+  bool openFileForRead(const char*, const std::string& path, HalFile& f) { return f.openForRead(mapPath(path)); }
+  bool openFileForRead(const char*, const char* path, HalFile& f) { return f.openForRead(mapPath(path)); }
+  bool openFileForWrite(const char*, const std::string& path, HalFile& f) { return f.openForWrite(mapPath(path)); }
+  bool openFileForWrite(const char*, const char* path, HalFile& f) { return f.openForWrite(mapPath(path)); }
+  bool openFileForUpdate(const char*, const std::string& path, HalFile& f) { return f.openForUpdate(mapPath(path)); }
+  bool openFileForUpdate(const char*, const char* path, HalFile& f) { return f.openForUpdate(mapPath(path)); }
+  bool exists(const char* path) { return std::filesystem::exists(mapPath(path)); }
   String readFile(const char* path) {
     HalFile file;
     if (!openFileForRead("", path, file)) return String("");
@@ -380,12 +385,21 @@ class HalStorage {
     const size_t length = contents.length();
     return file.write(contents.c_str(), length) == length;
   }
+
+  bool ensureDirectoryExists(const char* path) {
+    const std::string mapped = mapPath(path);
+    std::error_code ec;
+    if (std::filesystem::is_directory(mapped, ec) && !ec) return true;
+    ec.clear();
+    std::filesystem::create_directories(mapped, ec);
+    return !ec;
+  }
   // Mirrors the device HalStorage: stream a whole file into a Print sink in
   // chunks. Epub::applyMetadataSidecar() feeds ContentOpfParser through this,
   // so the host pipeline exercises the same code path the device runs.
   bool readFileToStream(const char* path, Print& out, size_t chunkSize = 256) {
     HalFile f;
-    if (!f.openForRead(path)) return false;
+    if (!f.openForRead(mapPath(path))) return false;
     std::vector<uint8_t> buf(chunkSize ? chunkSize : 256);
     for (;;) {
       const int n = f.read(buf.data(), buf.size());
@@ -407,28 +421,38 @@ class HalStorage {
     return f.read(out.data(), size) == static_cast<int>(size);
   }
   bool mkdir(const char* path, bool recursive = true) {
+    const std::string mapped = mapPath(path);
     std::error_code ec;
-    return recursive ? std::filesystem::create_directories(path, ec) : std::filesystem::create_directory(path, ec);
+    return recursive ? std::filesystem::create_directories(mapped, ec)
+                     : std::filesystem::create_directory(mapped, ec);
   }
-  bool remove(const char* path) { return std::filesystem::remove(path); }
+  bool remove(const char* path) { return std::filesystem::remove(mapPath(path)); }
   bool rename(const char* oldPath, const char* newPath) {
+    const std::string source = mapPath(oldPath);
+    const std::string destination = mapPath(newPath);
     std::error_code ec;
-    std::filesystem::rename(oldPath, newPath, ec);
+    if (std::filesystem::exists(destination, ec) || ec) return false;
+    std::filesystem::rename(source, destination, ec);
     return !ec;
+  }
+  bool publishStagedFileWithBackup(const char* tempPath, const char* livePath, const char* backupPath) {
+    const StagedFileReplace::Operations operations{this, &replaceExists, &replaceRename};
+    return StagedFileReplace::publish(operations, tempPath, livePath, backupPath);
   }
   bool removeDir(const char* path) {
     std::error_code ec;
-    std::filesystem::remove_all(path, ec);
+    std::filesystem::remove_all(mapPath(path), ec);
     return !ec;
   }
   using oflag_t = int;
   HalFile open(const char* path, oflag_t = O_RDONLY) {
     HalFile f;
+    const std::string mapped = mapPath(path);
     std::error_code ec;
-    if (std::filesystem::is_directory(path, ec) && !ec) {
-      f.openDir(path);
+    if (std::filesystem::is_directory(mapped, ec) && !ec) {
+      f.openDir(mapped);
     } else {
-      f.openForRead(path);
+      f.openForRead(mapped);
     }
     return f;
   }
@@ -437,7 +461,8 @@ class HalStorage {
   std::vector<String> listFiles(const char* path = "/", int maxFiles = 200) {
     std::vector<std::string> names;
     std::error_code ec;
-    for (const auto& e : std::filesystem::directory_iterator(path, ec)) {
+    const std::string mapped = mapPath(path);
+    for (const auto& e : std::filesystem::directory_iterator(mapped, ec)) {
       if (e.is_regular_file()) names.push_back(e.path().filename().string());
     }
     std::sort(names.begin(), names.end());
@@ -451,6 +476,25 @@ class HalStorage {
     static HalStorage i;
     return i;
   }
+
+ private:
+  static bool replaceExists(void* context, const char* path) {
+    return static_cast<HalStorage*>(context)->exists(path);
+  }
+  static bool replaceRename(void* context, const char* oldPath, const char* newPath) {
+    return static_cast<HalStorage*>(context)->rename(oldPath, newPath);
+  }
+  static inline std::string crosspointRoot_;
+  static std::string mapPath(const std::string& path) {
+    constexpr char prefix[] = "/.crosspoint";
+    constexpr size_t prefixLength = sizeof(prefix) - 1;
+    if (!crosspointRoot_.empty() && path.compare(0, prefixLength, prefix) == 0 &&
+        (path.size() == prefixLength || path[prefixLength] == '/')) {
+      return crosspointRoot_ + path;
+    }
+    return path;
+  }
+  static std::string mapPath(const char* path) { return mapPath(path == nullptr ? std::string() : std::string(path)); }
 };
 
 #define Storage HalStorage::getInstance()

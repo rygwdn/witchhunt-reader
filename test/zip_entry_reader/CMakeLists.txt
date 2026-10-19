@@ -18,11 +18,13 @@ add_executable(ZipEntryReaderTest
   ZipCorruptSizeTest.cpp
   LoggingStub.cpp
   ${REPO_ROOT}/lib/ZipFile/ZipFile.cpp
+  ${REPO_ROOT}/lib/hal/StagedFileReplace.cpp
 )
 
 target_include_directories(ZipEntryReaderTest PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}       # HalStorage.h (real I/O; shadows test/shims stub)
   ${REPO_ROOT}/lib/ZipFile
+  ${REPO_ROOT}/lib/hal
   ${REPO_ROOT}/lib/InflateReader
   ${REPO_ROOT}/lib/Logging
   ${REPO_ROOT}/lib/Serialization

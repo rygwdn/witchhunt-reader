@@ -209,6 +209,9 @@ Where the code here is someone else's, it is credited in the source file it live
 - **Home's Browse files and Recent books switches become one Library switch**, on if either of them was on, and Home's OPDS Browser entry moves into File Transfer.
 - **Font sizes are now stored in points.** Your sizes are converted on the first start and kept. If you go back to an older firmware, it resets a size of 9 pt or more to the default, and reads a smaller one as a different size.
 - **Catalan, Spanish and Vietnamese gained a few labels** from crosspoint-reader before the full translation, and German's message for a chapter with no content now reads "Leeres Kapitel" instead of "Kapitelende" ("end of chapter").
+### BookOrbit library
+
+- **Authenticated cover downloads now write to their staging file before publication.** Failed transfers preserve the existing destination instead of removing it prematurely.
 ### Reading and sync
 
 - **Automatic KOReader Sync leaves the reading page responsive.** While a background sync is
