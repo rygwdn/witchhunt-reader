@@ -86,6 +86,9 @@ class Rasterizer {
   /// it) and rebuildable. The output region stays in the ordinary heap, because it is the batch
   /// buffer the glyph log is written from.
   uint32_t scratchExternalBytes() const { return work_.external() ? work_.size() : 0; }
+  /// The working region's size: the cell pool, the points, the contours and the tags. Cold, and in
+  /// PSRAM where the board has it. The output region is the rest of the scratch block.
+  uint32_t workBytes() const { return outputOffset_; }
   const ScratchPlan& plan() const { return plan_; }
   /// The output region, plan().outputBytes long: render() leaves its bitmap here.
   uint8_t* output() { return outputData_; }
@@ -104,9 +107,9 @@ class Rasterizer {
  private:
   struct Loader;
 
-  uint8_t* block_ = nullptr;       // work_'s storage, or the caller's (attach())
-  uint8_t* outputData_ = nullptr;  // output_'s storage, or the tail of the caller's block
-  ColdBuffer work_;               // cold working storage on the fallback path
+  uint8_t* block_ = nullptr;           // work_'s storage, or the caller's (attach())
+  uint8_t* outputData_ = nullptr;      // output_'s storage, or the tail of the caller's block
+  ColdBuffer work_;                    // cold working storage on the fallback path
   std::unique_ptr<uint8_t[]> output_;  // internal batch buffer for flash writes
   uint32_t blockBytes_ = 0;
   ScratchPlan plan_;

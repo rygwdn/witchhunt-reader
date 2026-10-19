@@ -303,6 +303,10 @@ class TtfFontSet {
   /// Glyphs in the store need none of it, and the next miss makes it again. Only where no glyph record of the set is
   /// in use: as RenderLock is given back, and for the reader's memory ladder before an image decode. The bytes freed.
   uint32_t releaseMissMemory();
+  /// The two blocks a miss makes on the heap: the cold working region and the output region. A heap
+  /// without room for either refuses the miss; a test that models that refuses these two sizes.
+  uint32_t missWorkBytes() const { return rasterizer_.workBytes(); }
+  uint32_t missOutputBytes() const { return rasterizer_.plan().outputBytes; }
   /// What releaseMissMemory() would free now.
   uint32_t missMemoryBytes() const;
 

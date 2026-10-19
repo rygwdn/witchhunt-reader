@@ -28,23 +28,39 @@
 using namespace ttf_test;
 
 namespace {
-// A nothrow array new of exactly this many bytes fails, as the scratch block's does on a heap without room for it.
-size_t refuseArrayBytes = 0;
+// A nothrow array new of one of these byte counts fails, as the miss's blocks do on a heap without
+// room for them. The miss makes two: the cold working region and the output region.
+std::vector<size_t> refuseArrayBytes;
 // The bytes the program's news hold now: what a loaded family keeps is the difference across its load.
 size_t heapBytesHeld = 0;
 
-// A block with its size in front of it (malloc and free underneath, which the sanitizers pair as they pair any other).
-constexpr size_t kSizeHeader = alignof(std::max_align_t);
-void* holdBytes(const size_t size) noexcept {
-  auto* const block = static_cast<unsigned char*>(std::malloc(kSizeHeader + size));
+// The alignment the program's news must hand back: what the compiler expects of an ordinary
+// new. That is __STDCPP_DEFAULT_NEW_ALIGNMENT__ (16 on arm64), which is wider than
+// alignof(std::max_align_t) there (8): a fixture that asks for 16 and is handed 8 is a
+// misaligned construction, and the sanitizer reports it before the test runs.
+constexpr size_t kNewAlignment = alignof(std::max_align_t) > __STDCPP_DEFAULT_NEW_ALIGNMENT__
+                                     ? alignof(std::max_align_t)
+                                     : __STDCPP_DEFAULT_NEW_ALIGNMENT__;
+// A block with its size in front of it (aligned_alloc and free underneath, which the sanitizers
+// pair as they pair any other).
+constexpr size_t kSizeHeader = kNewAlignment;
+
+// The block a request is served from: its size in front, the caller's bytes after it, the whole
+// thing aligned for the caller's type. An over-aligned request gets its own header, so the
+// caller's bytes start on its alignment.
+void* holdBytes(const size_t size, const size_t alignment = kNewAlignment) noexcept {
+  const size_t header = alignment > kSizeHeader ? alignment : kSizeHeader;
+  const size_t total = header + size;
+  const size_t rounded = (total + alignment - 1) & ~(alignment - 1);
+  auto* const block = static_cast<unsigned char*>(std::aligned_alloc(alignment, rounded));
   if (!block) return nullptr;
   std::memcpy(block, &size, sizeof size);
   heapBytesHeld += size;
-  return block + kSizeHeader;
+  return block + header;
 }
-void freeBytes(void* p) noexcept {
+void freeBytes(void* p, const size_t alignment = kSizeHeader) noexcept {
   if (!p) return;
-  auto* const block = static_cast<unsigned char*>(p) - kSizeHeader;
+  auto* const block = static_cast<unsigned char*>(p) - alignment;
   size_t size = 0;
   std::memcpy(&size, block, sizeof size);
   heapBytesHeld -= size;
@@ -63,7 +79,10 @@ void* operator new[](const size_t size) {
   throw std::bad_alloc();
 }
 void* operator new[](const size_t size, const std::nothrow_t&) noexcept {
-  if (refuseArrayBytes != 0 && size == refuseArrayBytes) return nullptr;
+  if (!refuseArrayBytes.empty() &&
+      std::find(refuseArrayBytes.begin(), refuseArrayBytes.end(), size) != refuseArrayBytes.end()) {
+    return nullptr;
+  }
   return holdBytes(size);
 }
 void operator delete(void* p) noexcept { freeBytes(p); }
@@ -72,6 +91,36 @@ void operator delete(void* p, const std::nothrow_t&) noexcept { freeBytes(p); }
 void operator delete[](void* p) noexcept { freeBytes(p); }
 void operator delete[](void* p, size_t) noexcept { freeBytes(p); }
 void operator delete[](void* p, const std::nothrow_t&) noexcept { freeBytes(p); }
+
+// The aligned forms, so an over-aligned type is served and given back through the same
+// accounting. Without them the ordinary delete would take a header off a block this program
+// never handed out.
+void* operator new(const size_t size, const std::align_val_t alignment) {
+  if (void* p = holdBytes(size, static_cast<size_t>(alignment))) return p;
+  throw std::bad_alloc();
+}
+void* operator new[](const size_t size, const std::align_val_t alignment) {
+  if (void* p = holdBytes(size, static_cast<size_t>(alignment))) return p;
+  throw std::bad_alloc();
+}
+void* operator new(const size_t size, const std::align_val_t alignment, const std::nothrow_t&) noexcept {
+  return holdBytes(size, static_cast<size_t>(alignment));
+}
+void* operator new[](const size_t size, const std::align_val_t alignment, const std::nothrow_t&) noexcept {
+  return holdBytes(size, static_cast<size_t>(alignment));
+}
+void operator delete(void* p, const std::align_val_t alignment) noexcept {
+  freeBytes(p, static_cast<size_t>(alignment) > kSizeHeader ? static_cast<size_t>(alignment) : kSizeHeader);
+}
+void operator delete(void* p, size_t, const std::align_val_t alignment) noexcept {
+  freeBytes(p, static_cast<size_t>(alignment) > kSizeHeader ? static_cast<size_t>(alignment) : kSizeHeader);
+}
+void operator delete[](void* p, const std::align_val_t alignment) noexcept {
+  freeBytes(p, static_cast<size_t>(alignment) > kSizeHeader ? static_cast<size_t>(alignment) : kSizeHeader);
+}
+void operator delete[](void* p, size_t, const std::align_val_t alignment) noexcept {
+  freeBytes(p, static_cast<size_t>(alignment) > kSizeHeader ? static_cast<size_t>(alignment) : kSizeHeader);
+}
 
 namespace {
 
@@ -147,7 +196,7 @@ class TtfFontTest : public ::testing::Test {
   }
   void TearDown() override {
     TtfFont::setHooks({});
-    refuseArrayBytes = 0;
+    refuseArrayBytes.clear();
     EXPECT_EQ(0u, flash.violations());
     EXPECT_EQ(0u, flash.reprograms());
   }
@@ -1707,7 +1756,7 @@ TEST_F(TtfFontSetTest, AnArenaWithoutRoomLeavesTheMissToTheHeap) {
 TEST_F(TtfFontSetTest, AMissThatFindsNoMemoryIsDrawnAsMissingCountedAndAskedAgain) {
   const auto set = openSet();
   ASSERT_NE(nullptr, set);
-  refuseArrayBytes = set->scratchBytes();
+  refuseArrayBytes = {set->missWorkBytes(), set->missOutputBytes()};
   const uint32_t renders = set->font(0)->renders();
   {
     const glyph_miss::Scope misses(nullptr);
@@ -1719,7 +1768,7 @@ TEST_F(TtfFontSetTest, AMissThatFindsNoMemoryIsDrawnAsMissingCountedAndAskedAgai
   EXPECT_EQ(renders, set->font(0)->renders());
   EXPECT_EQ(0u, set->releaseMissMemory());
   // Not marked missing in the store: drawn once the memory is there.
-  refuseArrayBytes = 0;
+  refuseArrayBytes.clear();
   const uint32_t starved = glyph_miss::starvedCount();
   expectDrawnAs(reference(files[kRegular].bytes, 'K', 14), *set->font(0), kRegular, set->font(0)->glyph(kRegular, 'K'));
   EXPECT_EQ(starved, glyph_miss::starvedCount());
@@ -1735,23 +1784,23 @@ TEST_F(TtfFontSetTest, WhatTheAppCanSpareIsFreedOnceBeforeAMissGoesWithout) {
   frees = true;
   TtfFont::setHooks({nullptr, nullptr, [] {
                        ++reclaims;
-                       if (frees) refuseArrayBytes = 0;  // the built-in font caches given back
+                       if (frees) refuseArrayBytes.clear();  // the built-in font caches given back
                        return frees;
                      }});
   const Reference r = reference(files[kRegular].bytes, 'R', 14);  // before any refusal
-  refuseArrayBytes = set->scratchBytes();
+  refuseArrayBytes = {set->missWorkBytes(), set->missOutputBytes()};
   expectDrawnAs(r, *set->font(0), kRegular, set->font(0)->glyph(kRegular, 'R'));
   EXPECT_EQ(1, reclaims);
   EXPECT_EQ(set->scratchBytes(), set->releaseMissMemory());
   // Nothing to spare: asked once, and the miss goes without.
   frees = false;
-  refuseArrayBytes = set->scratchBytes();
+  refuseArrayBytes = {set->missWorkBytes(), set->missOutputBytes()};
   const uint32_t starved = glyph_miss::starvedCount();
   EXPECT_EQ(nullptr, set->font(0)->glyph(kRegular, 'S'));
   EXPECT_EQ(2, reclaims);
   EXPECT_EQ(starved + 1, glyph_miss::starvedCount());
   // The rest of the pass goes without at once, with nothing asked of the heap or the app; the next pass asks again.
-  refuseArrayBytes = 0;
+  refuseArrayBytes.clear();
   EXPECT_EQ(nullptr, set->font(0)->glyph(kRegular, 'T'));
   EXPECT_EQ(2, reclaims);
   EXPECT_EQ(starved + 2, glyph_miss::starvedCount());
