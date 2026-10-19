@@ -941,9 +941,10 @@ bool ChapterHtmlSlimParser::ensureHeapForTextLayout(const char* phase, const Par
   // one outcome this gate exists to prevent.
   // See EHP_TEXT_LAYOUT_HARD_MIN_MAX_ALLOC_ARENA: with line bytes in the arena the heap floor
   // only has to cover the per-paragraph vectors.
-  const size_t hardContigFloor = buildArena_ == nullptr ? MIN_MAX_ALLOC_FOR_TEXT_LAYOUT_HARD
-                                 : bionicReadingEnabled ? MIN_MAX_ALLOC_FOR_TEXT_LAYOUT_HARD_ARENA_BIONIC
-                                                        : MIN_MAX_ALLOC_FOR_TEXT_LAYOUT_HARD_ARENA;
+  const size_t hardContigFloor = buildArena_ == nullptr || collectingHeadings_
+                                    ? MIN_MAX_ALLOC_FOR_TEXT_LAYOUT_HARD
+                                    : bionicReadingEnabled ? MIN_MAX_ALLOC_FOR_TEXT_LAYOUT_HARD_ARENA_BIONIC
+                                                           : MIN_MAX_ALLOC_FOR_TEXT_LAYOUT_HARD_ARENA;
   if (freeHeap >= MIN_FREE_HEAP_FOR_TEXT_LAYOUT_HARD && maxAllocHeap >= hardContigFloor - LARGEST_FREE_BLOCK_SLACK) {
     // Deliberately does NOT latch image handling off any more. This gate trips on a transient dip
     // — and trips often, because the soft floor (12 * 1024) is a value the allocator can never
@@ -1197,6 +1198,7 @@ bool ChapterHtmlSlimParser::flushPartWordBuffer() {
     if (newFontSlot && wordFontsSize_ != 0) resolveWordFont(fontSlot);
 
     if (currentTextBlock->size() > 96) {
+      flushHeadingRun(kKeepWithNextLines * effectiveLineHeight(currentTextBlock->getBlockStyle()));
       if (!ensureHeapForTextLayout("long-block split", currentTextBlock.get())) {
         partWordBufferIndex = 0;
         nextWordContinues = false;
@@ -1267,6 +1269,7 @@ bool ChapterHtmlSlimParser::flushPartWordBuffer() {
 }
 
 void ChapterHtmlSlimParser::noteElementOnPage(const uint32_t offset) {
+  if (collectingHeadings_) return;
   if (currentPageVisibleOffsetSet_) return;
   currentPageVisibleOffset_ = offset;
   currentPageVisibleOffsetSet_ = true;
@@ -1281,6 +1284,7 @@ void ChapterHtmlSlimParser::noteElementOnPage(const uint32_t offset) {
 // Callers must ensure currentPage is non-null and carries content; the helper resets
 // currentPage to a fresh Page and zeroes currentPageNextY so the caller can keep building.
 void ChapterHtmlSlimParser::emitPage() {
+  flushHeadingRun(0);
   // A page with no noted element (nothing but spacing) starts where the next element does, which
   // noteElementOnPage fills in. The counter stands in only if no element ever follows; taken now,
   // mid-chunk, it could lie past the next page's first word.
@@ -1333,6 +1337,7 @@ void ChapterHtmlSlimParser::emitPage() {
 void ChapterHtmlSlimParser::applyPendingPageBreak() {
   if (!pageBreakPending_) return;
   pageBreakPending_ = false;
+  flushHeadingRun();
   if (currentPage && !currentPage->elements.empty()) emitPage();
 }
 
@@ -1392,8 +1397,8 @@ void ChapterHtmlSlimParser::wireTextBlock() {
 }
 
 void ChapterHtmlSlimParser::wireParagraphLines(ParsedText& text) {
-  text.setLineArena(buildArena_);
-  if (buildArena_) {
+  text.setLineArena(collectingHeadings_ ? nullptr : buildArena_);
+  if (buildArena_ && !collectingHeadings_) {
     text.setBeforeLineHook([this](const uint8_t maxSizePct) { beforeLineHook(maxSizePct); });
   } else {
     text.setBeforeLineHook(nullptr);
@@ -1524,6 +1529,7 @@ void ChapterHtmlSlimParser::endExternalPageBreakAnchors() {
 
 void ChapterHtmlSlimParser::attachPendingFloatImage(BlockStyle& bs) {
   if (!pendingInlineImage_.active) return;
+  flushHeadingRun();
   if (!currentPage) currentPage.reset(new (std::nothrow) Page());
 
   const int16_t imgH = pendingInlineImage_.height;
@@ -1625,6 +1631,7 @@ bool ChapterHtmlSlimParser::tryStartDropCapCapture(const CssStyle& cssStyle) {
 }
 
 void ChapterHtmlSlimParser::finalizePendingDropCap() {
+  flushHeadingRun();
   pendingDropCap_.active = false;
   const int textLen = pendingDropCap_.textLen;
   pendingDropCap_.textLen = 0;
@@ -2208,6 +2215,7 @@ void ChapterHtmlSlimParser::startElement(void* userData, const char* name, const
     // block tag opens, and flushPartWordBuffer drops words when there is no block to take them.
     self->clearSpentBlockHeadingStyle();
     self->applyPendingPageBreak();
+    self->flushHeadingRun();
     self->currentTable = std::unique_ptr<BufferedTable>(new BufferedTable());
     self->currentTable->depth = 1;
     if (atts != nullptr) {
@@ -2692,6 +2700,7 @@ void ChapterHtmlSlimParser::startElement(void* userData, const char* name, const
                   self->startNewTextBlock(parentBlockStyle);
                 }
                 self->applyPendingPageBreak();
+                self->flushHeadingRun();
 
                 // If the current text block is still empty, it may carry accumulated parent
                 // block spacing (e.g. div/figure/h1 wrappers). Apply that spacing around the
@@ -3133,6 +3142,7 @@ void ChapterHtmlSlimParser::startElement(void* userData, const char* name, const
     }
     self->makePages();
     self->applyPendingPageBreak();
+    self->flushHeadingRun();
     if (!self->currentPage) {
       self->currentPage.reset(new Page());
       self->currentPageNextY = 0;
@@ -4001,6 +4011,15 @@ size_t ChapterHtmlSlimParser::anchorLimit() const {
 
 void ChapterHtmlSlimParser::flushAnchorsAwaitingLine() {
   if (anchorsAwaitingLine_.empty()) return;
+  if (collectingHeadings_) {
+    if (!heapReserveFor(headingRunAnchors_, anchorsAwaitingLine_.size())) {
+      layoutFailed = true;
+      return;
+    }
+    for (auto& id : anchorsAwaitingLine_) headingRunAnchors_.push_back(std::move(id));
+    anchorsAwaitingLine_.clear();
+    return;
+  }
   for (auto& id : anchorsAwaitingLine_) {
     recordAnchor(std::move(id), static_cast<uint16_t>(completedPageCount));
   }
@@ -4281,6 +4300,7 @@ bool ChapterHtmlSlimParser::finalize() {
   // success scenario still flushes whatever pages were produced.
   if (currentTextBlock) {
     makePages();
+    flushHeadingRun();
     if (!layoutFailed) {
       const bool hasFinalPageContent = currentPage && !currentPage->elements.empty();
       if (!pendingAnchorId.empty()) {
@@ -4406,21 +4426,55 @@ ParsedText::LineProcessResult ChapterHtmlSlimParser::addLineToPage(std::unique_p
   if (maxPct != 100) {
     lineHeight = lineHeight * maxPct / 100;
   }
+  lineHeight = std::max(1, lineHeight);
+  const int headingReserve =
+      collectingHeadings_
+          ? kKeepWithNextLines * static_cast<int>(renderer.getLineHeight(fontId) * lineCompression + 0.5f)
+          : 0;
+
+  if (collectingHeadings_ && headingRun_ && !headingRun_->elements.empty() &&
+      (currentPageNextY + lineHeight + headingReserve > viewportHeight ||
+       headingRunAnchors_.size() + anchorsAwaitingLine_.size() > MAX_ANCHORS_AWAITING_LINE)) {
+    headingRunHeight_ = currentPageNextY;
+    flushHeadingRun();
+  }
+  if (collectingHeadings_ && !headingRun_) {
+    // One viewport of unplaced render slices, not another framebuffer or retained page arena.
+    headingRun_ = makeUniqueNoThrow<Page>();
+    if (!headingRun_ || !heapReserveFor(headingRun_->elements, Page::TYPICAL_ELEMENTS)) {
+      layoutFailed = true;
+      return ParsedText::LineProcessResult::Accepted;
+    }
+    headingRunOffset_ = lineVisibleOffset;
+  }
+  struct RestoreOutputPage {
+    std::unique_ptr<Page>& output;
+    std::unique_ptr<Page>& pending;
+    bool collecting;
+    ~RestoreOutputPage() {
+      if (collecting) output.swap(pending);
+    }
+  } restore{currentPage, headingRun_, collectingHeadings_};
+  if (collectingHeadings_) currentPage.swap(headingRun_);
 
   if (!currentPage) {
     currentPage.reset(new Page());
     currentPageNextY = 0;
   }
 
-  if (currentPageNextY + lineHeight > viewportHeight || keepTogetherBreak(lineHeight)) {
+  if (!collectingHeadings_ &&
+      (currentPageNextY + lineHeight > viewportHeight || keepTogetherBreak(lineHeight))) {
     emitPage();
   }
 
   // The page's last line must not end in a hyphenated word: also when the page ends early, before
   // the next line, to keep a widow or an orphan off it.
   const bool noRoomForAnotherLine =
-      currentPageNextY + lineHeight <= viewportHeight &&
-      (currentPageNextY + (lineHeight * 2) > viewportHeight || keepTogetherBreak(lineHeight, /*nextLine=*/true));
+      collectingHeadings_
+          ? currentPageNextY + lineHeight * 2 + headingReserve > viewportHeight
+          : currentPageNextY + lineHeight <= viewportHeight &&
+                (currentPageNextY + lineHeight * 2 > viewportHeight ||
+                 keepTogetherBreak(lineHeight, /*nextLine=*/true));
   if (lineEndsWithHyphenatedWord && !suppressHyphenationRetry && noRoomForAnotherLine) {
     const std::string linePreview = buildTextBlockPreview(line.get());
     LOG_TRC("EHP", "Requesting line rerender without hyphenation to avoid page-break split word: %s",
@@ -4570,7 +4624,97 @@ void ChapterHtmlSlimParser::clearSpentBlockHeadingStyle() {
   spent.keepWithNext = false;
 }
 
+void ChapterHtmlSlimParser::flushHeadingRun(const int followingHeight) {
+  if (!headingRun_ || headingRun_->elements.empty()) return;
+  const int following = followingHeight >= 0
+                            ? followingHeight
+                            : kKeepWithNextLines *
+                                  static_cast<int>(renderer.getLineHeight(fontId) * lineCompression + 0.5f);
+  const bool collecting = collectingHeadings_;
+  if (collecting) {
+    currentPageNextY = headingLiveY_;
+    lastBlockMarginBottom = headingLiveMarginBottom_;
+    collectingHeadings_ = false;
+  }
+  auto run = std::move(headingRun_);
+  int16_t trimTop = 0;
+  if (currentPage && !currentPage->elements.empty() &&
+      currentPageNextY + headingRunHeight_ + following > viewportHeight) {
+    emitPage();
+    trimTop = run->elements.front()->yPos;
+  }
+  if (!currentPage) currentPage = makeUniqueNoThrow<Page>();
+  if (!currentPage || !heapReserveFor(currentPage->elements, run->elements.size())) {
+    layoutFailed = true;
+  } else {
+    const int16_t y = currentPageNextY;
+    for (auto& element : run->elements) {
+      element->yPos += y - trimTop;
+      currentPage->elements.push_back(std::move(element));
+    }
+    for (const auto& footnote : run->footnotes) {
+      if (!currentPage->addFootnote(footnote.number, footnote.href))
+        noteCapOverflow(kCapFootnotesPerPage, "footnote links per page");
+    }
+    noteElementOnPage(headingRunOffset_);
+    for (auto& id : headingRunAnchors_) recordAnchor(std::move(id), static_cast<uint16_t>(completedPageCount));
+    currentPageNextY += headingRunHeight_ - trimTop;
+    lastBlockMarginBottom = headingRunMarginBottom_;
+  }
+  headingRunAnchors_.clear();
+  headingRunHeight_ = 0;
+  headingRunMarginBottom_ = 0;
+  if (collecting) {
+    headingLiveY_ = currentPageNextY;
+    headingLiveMarginBottom_ = lastBlockMarginBottom;
+    currentPageNextY = 0;
+    lastBlockMarginBottom = 0;
+    collectingHeadings_ = true;
+  }
+}
+
 void ChapterHtmlSlimParser::makePages() {
+  if (!layoutFailed && currentTextBlock && !currentTextBlock->isEmpty()) {
+    // Resolve once, before measuring either the heading run or its following body lines.
+    if (!currentTextBlock->isContinuation()) currentTextBlock->foldUniformWordSizes();
+    resolveBlockFont(currentTextBlock->getBlockStyle());
+  }
+  const bool heading = currentTextBlock && !currentTextBlock->isEmpty() &&
+                       currentTextBlock->getBlockStyle().keepWithNext &&
+                       !currentTextBlock->isContinuation() &&
+                       currentTextBlock->getBlockStyle().floatZoneCount == 0 &&
+                       !deferredPageImage_ && !deferredDropCapLine_ && activeFloatBottom_ == 0 &&
+                       effectiveLineHeight(currentTextBlock->getBlockStyle()) > 0;
+  if (!heading) {
+    const int bodyHeight = currentTextBlock && !currentTextBlock->isEmpty()
+                               ? kKeepWithNextLines * effectiveLineHeight(currentTextBlock->getBlockStyle()) +
+                                     std::max<int>(currentTextBlock->getBlockStyle().marginTop -
+                                                       headingRunMarginBottom_,
+                                                   0) +
+                                     std::max<int>(currentTextBlock->getBlockStyle().paddingTop, 0)
+                               : -1;
+    flushHeadingRun(bodyHeight);
+    makePagesNow();
+    return;
+  }
+  headingLiveY_ = currentPageNextY;
+  headingLiveMarginBottom_ = lastBlockMarginBottom;
+  const uint16_t liveParagraphLines = paragraphLinesOnPage_;
+  currentPageNextY = headingRunHeight_;
+  lastBlockMarginBottom = headingRun_ ? headingRunMarginBottom_ : headingLiveMarginBottom_;
+  collectingHeadings_ = true;
+  wireTextBlock();
+  makePagesNow();
+  headingRunHeight_ = currentPageNextY;
+  headingRunMarginBottom_ = lastBlockMarginBottom;
+  currentPageNextY = headingLiveY_;
+  lastBlockMarginBottom = headingLiveMarginBottom_;
+  paragraphLinesOnPage_ = liveParagraphLines;
+  collectingHeadings_ = false;
+  wireTextBlock();
+}
+
+void ChapterHtmlSlimParser::makePagesNow() {
   if (layoutFailed) {
     currentTextBlock.reset();
     return;
@@ -4581,14 +4725,6 @@ void ChapterHtmlSlimParser::makePages() {
     return;
   }
 
-  // Snap the block to the size ladder before any metric below is computed. Uniform
-  // per-word sizes (a span wrapping the whole paragraph) fold into the block multiplier
-  // first so they benefit too; continuations skip the fold — their first chunk already
-  // laid out with the resolved style, and resolveBlockFont is a no-op on them anyway.
-  if (!currentTextBlock->isContinuation()) {
-    currentTextBlock->foldUniformWordSizes();
-  }
-  resolveBlockFont(currentTextBlock->getBlockStyle());
 
   if (!applyBlockTopSpacing()) {
     currentTextBlock.reset();
@@ -4657,9 +4793,10 @@ void ChapterHtmlSlimParser::makePages() {
   // Fallback: transfer any remaining pending footnotes to current page.
   // Normally addLineToPage handles this via word-index tracking, but this catches
   // edge cases where a footnote's word index equals the exact block size.
-  if (!pendingFootnotes.empty() && currentPage) {
+  Page* const footnotePage = collectingHeadings_ ? headingRun_.get() : currentPage.get();
+  if (!pendingFootnotes.empty() && footnotePage) {
     for (const auto& [idx, fn] : pendingFootnotes) {
-      if (!currentPage->addFootnote(fn.number, fn.href))
+      if (!footnotePage->addFootnote(fn.number, fn.href))
         noteCapOverflow(kCapFootnotesPerPage, "footnote links per page");
     }
     pendingFootnotes.clear();
@@ -4999,6 +5136,7 @@ void ChapterHtmlSlimParser::placeBackgroundImage(const std::string& resolvedPath
   if (partWordBufferIndex > 0 && !flushPartWordBuffer()) return;
   if (currentTextBlock && !currentTextBlock->isEmpty()) makePages();
   applyPendingPageBreak();
+  flushHeadingRun();
   uint16_t nativeWidth = 0;
   uint16_t nativeHeight = 0;
   auto image = buildImageFromEpubPath(resolvedPath, {}, static_cast<uint16_t>(viewportWidth),

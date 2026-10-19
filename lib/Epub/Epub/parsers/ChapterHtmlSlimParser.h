@@ -159,6 +159,18 @@ class ChapterHtmlSlimParser final : public Print {
   std::unique_ptr<Page> currentPage = nullptr;
   int16_t currentPageNextY = 0;
   int16_t lastBlockMarginBottom = 0;  // tracks previous block's marginBottom for CSS margin collapsing
+  // A heading chain is measured before any of its lines is placed on an output page.
+  // These render slices own heap bytes, never a previous page's rewindable arena block.
+  // Hold at most one viewport of lines; an over-height chain splits rather than growing forever.
+  std::unique_ptr<Page> headingRun_;
+  std::vector<std::string> headingRunAnchors_;
+  int16_t headingRunHeight_ = 0;
+  int16_t headingRunMarginBottom_ = 0;
+  int16_t headingLiveY_ = 0;
+  int16_t headingLiveMarginBottom_ = 0;
+  uint32_t headingRunOffset_ = 0;
+  bool collectingHeadings_ = false;
+  void flushHeadingRun(int followingHeight = -1);
 
   // CSS page-break-before / page-break-after: a break waiting for the next content. It is taken
   // once the text before it is laid out (applyPendingPageBreak), not at the tag: at a start tag
@@ -741,6 +753,7 @@ class ChapterHtmlSlimParser final : public Print {
   bool heapAllowsTableRowLayout() const;
   bool flushPartWordBuffer();
   void makePages();
+  void makePagesNow();
   // Puts currentTextBlock's top spacing on the current page, once per logical paragraph. Both
   // places that lay the block out call it first: makePages() and the long-block split in
   // flushPartWordBuffer(). Returns false, with layoutFailed set, when no page could be allocated.

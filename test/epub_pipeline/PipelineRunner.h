@@ -3,8 +3,8 @@
 // footnote gather, per-spine Section build) on the host and emits a canonical
 // text dump of the resulting layout: per page, every element's position, every
 // word's text/x-position/style. Two runs over the same book with the same
-// profile must produce byte-identical dumps (determinism), and any layout
-// refactor must keep the dump unchanged (golden equivalence).
+// profile must produce byte-identical dumps (determinism), and layout refactors
+// for golden-backed fixtures must keep the dump unchanged (golden equivalence).
 #include <cstdint>
 #include <functional>
 #include <ostream>

@@ -22,10 +22,12 @@
 #include <gtest/gtest.h>
 
 #include <filesystem>
+#include <map>
 #include <string>
 #include <vector>
 
 #include "EpdFontFamily.h"
+#include "BuildArena.h"
 #include "Epub.h"
 #include "Epub/Page.h"
 #include "Epub/Section.h"
@@ -47,6 +49,7 @@ struct Line {
 
 struct HeadingBlockLayoutFixture : testing::Test {
   fs::path work;
+  void checkHeadingChain(bool externalArena);
 
   void SetUp() override {
     work = fs::temp_directory_path() /
@@ -180,6 +183,111 @@ TEST_F(HeadingBlockLayoutFixture, BlockInAHeadingKeepsItsOwnSize) {
   const auto lines = layout("div.big { font-size: 2em; }\n", "<h2><div>Alpha</div><div class=\"big\">Bravo</div></h2>");
   ASSERT_EQ(lines.size(), 2u);
   EXPECT_GT(lines[1].mult, lines[0].mult);
+}
+
+void HeadingBlockLayoutFixture::checkHeadingChain(const bool externalArena) {
+  const auto book = makeBook("h2 { font-size: 100%; }\n",
+                             "<p>Earlier</p><p>Earlier</p><p>Earlier</p>"
+                             "<h2 id=\"alpha\">Alpha</h2><h2 id=\"bravo\">Bravo</h2>"
+                             "<h2 id=\"charlie\">Charlie</h2>"
+                             "<p>BodyStart one two three four five six seven eight nine ten eleven twelve "
+                             "thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty.</p>");
+  auto epub = std::make_shared<Epub>(book, (work / "chain-cache").string());
+  ASSERT_TRUE(epub->load(true));
+  Section::BuildParams params;
+  params.viewportWidth = 480;
+  params.viewportHeight = 160;
+  params.lineCompression = 1.0f;
+  params.embeddedStyle = true;
+  GfxRenderer renderer;
+  std::vector<uint8_t> arenaBytes(64 * 1024);
+  BuildArena arena(arenaBytes.data(), arenaBytes.size());
+  Section section(epub, 0, renderer);
+  if (externalArena) section.setExternalBuildScratch(&arena);
+  ASSERT_TRUE(section.createSectionFile(params, {}, /*skipEviction=*/true));
+  ASSERT_TRUE(section.loadSectionFile(params));
+  std::map<std::string, int> pageForWord;
+  for (uint16_t pageIndex = 0; pageIndex < section.pageCount; ++pageIndex) {
+    section.currentPage = pageIndex;
+    const auto page = section.loadPageFromSectionFile();
+    ASSERT_TRUE(page);
+    for (const auto& element : page->elements) {
+      if (element->getTag() != TAG_PageLine) continue;
+      const auto& block = *static_cast<const PageLine&>(*element).getBlock();
+      for (uint16_t word = 0; word < block.wordCount(); ++word) {
+        pageForWord[block.wordText(word)] = pageIndex;
+      }
+    }
+  }
+  ASSERT_TRUE(pageForWord.contains("Alpha"));
+  ASSERT_TRUE(pageForWord.contains("Charlie"));
+  ASSERT_TRUE(pageForWord.contains("Bravo"));
+  ASSERT_TRUE(pageForWord.contains("BodyStart"));
+  ASSERT_TRUE(pageForWord.contains("Earlier"));
+  EXPECT_EQ(pageForWord["Alpha"], pageForWord["BodyStart"]);
+  EXPECT_EQ(pageForWord["Charlie"], pageForWord["BodyStart"]);
+  EXPECT_EQ(pageForWord["Bravo"], pageForWord["BodyStart"]);
+  EXPECT_LT(pageForWord["Earlier"], pageForWord["Alpha"]);
+  EXPECT_EQ(section.getPageForAnchor("alpha"), pageForWord["Alpha"]);
+  EXPECT_EQ(section.getPageForAnchor("bravo"), pageForWord["Bravo"]);
+  EXPECT_EQ(section.getPageForAnchor("charlie"), pageForWord["Charlie"]);
+}
+
+TEST_F(HeadingBlockLayoutFixture, ConsecutiveHeadingsMoveTogetherWithFollowingBody) {
+  checkHeadingChain(false);
+}
+
+TEST_F(HeadingBlockLayoutFixture, ConsecutiveHeadingsAndAnchorsSurvivePreviousPageArenaRelease) {
+  checkHeadingChain(true);
+}
+
+TEST_F(HeadingBlockLayoutFixture, HeadingRunTallerThanAPageSplitsWithoutLosingText) {
+  std::string body = "<p>Before</p>";
+  for (unsigned i = 0; i < 100; ++i) body += "<h2>Heading" + std::to_string(i) + "</h2>";
+  body += "<p>After</p>";
+  const auto lines = layout("h2 { font-size: 100%; }\n", body);
+  ASSERT_EQ(lines.size(), 102u);
+  EXPECT_EQ(lines.front().text, "Before");
+  for (unsigned i = 0; i < 100; ++i) {
+    EXPECT_EQ(lines[i + 1].text, "Heading" + std::to_string(i));
+    EXPECT_GE(lines[i + 1].y, 0);
+    EXPECT_LT(lines[i + 1].y, 800);
+  }
+  EXPECT_EQ(lines.back().text, "After");
+}
+
+TEST_F(HeadingBlockLayoutFixture, OversizedHeadingDoesNotLeaveHyphenatedWordsAtPageEnds) {
+  std::string body = "<h2>";
+  for (unsigned i = 0; i < 24; ++i) body += "internationalization extraordinary ";
+  body += "</h2><p>After</p>";
+  auto epub = std::make_shared<Epub>(makeBook("h2 { font-size: 100%; }\n", body),
+                                     (work / "cache").string());
+  ASSERT_TRUE(epub->load(true));
+  Section::BuildParams params;
+  params.viewportWidth = 120;
+  params.viewportHeight = 160;
+  params.lineCompression = 1.0f;
+  params.embeddedStyle = true;
+  params.hyphenationEnabled = true;
+  GfxRenderer renderer;
+  Section section(epub, 0, renderer);
+  ASSERT_TRUE(section.createSectionFile(params, {}, /*skipEviction=*/true));
+  bool interiorHyphen = false;
+  for (uint16_t pageIndex = 0; pageIndex < section.pageCount; ++pageIndex) {
+    section.currentPage = pageIndex;
+    const auto page = section.loadPageFromSectionFile();
+    ASSERT_TRUE(page);
+    bool lastLineHyphen = false;
+    for (const auto& element : page->elements) {
+      if (element->getTag() != TAG_PageLine) continue;
+      const auto& block = *static_cast<const PageLine&>(*element).getBlock();
+      if (!block.wordCount()) continue;
+      interiorHyphen |= lastLineHyphen;
+      lastLineHyphen = std::string_view(block.wordText(block.wordCount() - 1)).ends_with("-");
+    }
+    EXPECT_FALSE(lastLineHyphen) << "page " << pageIndex;
+  }
+  EXPECT_TRUE(interiorHyphen) << "the heading must exercise automatic word splitting";
 }
 
 namespace {
