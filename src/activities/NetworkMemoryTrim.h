@@ -32,6 +32,11 @@ class GfxRenderer;
 // caller that keeps running afterwards, follow the full Scenario 1 procedure in
 // the doc instead of using this helper.
 //
+// On a board where the secondary buffer is external (PSRAM), the buffer release is
+// skipped and only the font cache is dropped: the radio's allocations cannot come
+// out of the bytes it would return, so releasing it would degrade every status
+// screen for nothing. See freeingReclaimsInternal() in lib/Memory/HeapPools.h.
+//
 // Idempotent: safe to call again before TLS to drop font cache that status
 // screens repopulated since the first call.
 void trimMemoryForNetworkSession(const GfxRenderer& renderer, const char* logTag);

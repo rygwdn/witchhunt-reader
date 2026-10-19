@@ -2,6 +2,7 @@
 
 #include <FontCacheManager.h>
 #include <GfxRenderer.h>
+#include <HeapPools.h>
 #include <I18n.h>
 #include <Logging.h>
 #include <Memory.h>
@@ -361,8 +362,8 @@ void FontSelectionActivity::advanceWarmup() {
   // kern-heavy family needs, so the brake only bites when something else has
   // genuinely taken the big block.
   dropPreviewFont();
-  const uint32_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_DEFAULT);
-  // The brake only matters on the heap path: with the buffer lent, previews never touch the heap.
+  const uint32_t largest = internalContigBytes();
+  // Arena-backed previews do not need a contiguous heap allocation.
   if (!previewArena_ && largest < WARMUP_MIN_CONTIGUOUS) {
     LOG_ERR("FPRV", "Stopping warm-up at %u/%u: largest free block %lu below floor", static_cast<unsigned>(warmupDone),
             static_cast<unsigned>(warmupQueue.size()), static_cast<unsigned long>(largest));

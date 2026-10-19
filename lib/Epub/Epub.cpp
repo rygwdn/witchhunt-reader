@@ -5,6 +5,7 @@
 #include <CooperativeAbort.h>
 #include <FsHelpers.h>
 #include <HalStorage.h>
+#include <HeapPools.h>
 #include <I18n.h>
 #include <InflateReader.h>
 #include <JpegToBmpConverter.h>
@@ -734,7 +735,7 @@ void Epub::parseCssFiles() const {
     // demanded (observed skipping a 3.3 KB stylesheet at 63.8 KB free, silently stripping the
     // book's styles). Base covers parser state + SD buffers + reserve; 1x file size generously
     // covers the selector-offset staging. Unknown size (lookup failed) gates on the base alone.
-    const uint32_t freeHeap = ESP.getFreeHeap();
+    const uint32_t freeHeap = internalFreeBytes();
     const size_t neededHeap = CSS_PARSE_BASE_HEAP_BYTES + cssFileSize;
     if (freeHeap < neededHeap) {
       LOG_ERR("EBP", "Insufficient heap for CSS parsing (%u bytes free, need %zu), skipping: %s", freeHeap, neededHeap,

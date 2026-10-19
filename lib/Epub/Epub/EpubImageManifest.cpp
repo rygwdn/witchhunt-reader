@@ -4,6 +4,7 @@
 #include <BuildArena.h>
 #include <FsHelpers.h>
 #include <HalStorage.h>
+#include <HeapPools.h>
 #include <InflateReader.h>
 #include <Logging.h>
 #include <Memory.h>
@@ -74,6 +75,16 @@ bool readPending(FsFile& f, uint64_t& key, ZipFile::FileStatSlim& stat) {
 }
 }  // namespace
 
+void EpubImageManifest::RecordDeleter::operator()(EpubImageManifest::Record* const records) const noexcept {
+  if (!records) return;
+#if defined(BOARD_HAS_PSRAM) && BOARD_HAS_PSRAM
+  if (esp_ptr_external_ram(records)) {
+    heap_caps_free(records);
+    return;
+  }
+#endif
+  delete[] records;
+}
 uint64_t EpubImageManifest::keyFor(const std::string& epubEntryPath) { return HashUtils::fnvHash64(epubEntryPath); }
 
 std::string EpubImageManifest::pendingPath() const { return cachePath_ + kPendingFile; }
@@ -142,7 +153,40 @@ bool EpubImageManifest::load(const std::string& cachePath) {
 
 bool EpubImageManifest::reserveRecords(const uint16_t wanted) {
   if (wanted <= capacity_) return true;
-  auto grown = makeUniqueNoThrow<Record[]>(wanted);
+
+  // External spare slots are written before count_ exposes them; start their trivial lifetimes
+  // without zeroing up to the full 768 KiB cache on each growth.
+  RecordArray grown;
+#if defined(BOARD_HAS_PSRAM) && BOARD_HAS_PSRAM
+  // Once the cache spills over, keep subsequent growth external rather than reclaiming internal
+  // RAM on a later expansion.
+  const bool alreadyExternal = records_ && esp_ptr_external_ram(records_.get());
+  if (alreadyExternal) {
+    auto external = psramAllocBytes(static_cast<size_t>(wanted) * sizeof(Record));
+    if (external) {
+      auto* data = reinterpret_cast<Record*>(external.get());
+      std::uninitialized_default_construct_n(data, wanted);
+      grown.reset(reinterpret_cast<Record*>(external.release()));
+    }
+  } else
+#endif
+  {
+    auto internal = makeUniqueNoThrow<Record[]>(wanted);
+    if (internal) {
+      grown.reset(internal.release());
+    }
+#if defined(BOARD_HAS_PSRAM) && BOARD_HAS_PSRAM
+    else {
+      auto external = psramAllocBytes(static_cast<size_t>(wanted) * sizeof(Record));
+      if (external) {
+        auto* data = reinterpret_cast<Record*>(external.get());
+        std::uninitialized_default_construct_n(data, wanted);
+        grown.reset(reinterpret_cast<Record*>(external.release()));
+      }
+    }
+#endif
+  }
+
   if (!grown) return false;
   if (count_ > 0) memcpy(grown.get(), records_.get(), static_cast<size_t>(count_) * sizeof(Record));
   records_ = std::move(grown);

@@ -8,7 +8,7 @@
 #include <SecureHttpClient.h>
 #include <WiFi.h>
 #include <esp_err.h>
-#include <esp_heap_caps.h>
+#include <HeapPools.h>
 
 #include <algorithm>
 #include <cctype>
@@ -121,7 +121,7 @@ void beginRequest(const char* operation) {
   KOReaderSyncClient::lastEspError = 0;
   KOReaderSyncClient::lastHttpCode = 0;
   KOReaderSyncClient::lastHeapAtFailure = ESP.getFreeHeap();
-  KOReaderSyncClient::lastContigHeapAtFailure = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_DEFAULT);
+  KOReaderSyncClient::lastContigHeapAtFailure = internalContigBytes();
   g_lastResponsePreview[0] = '\0';
   g_lastInvalidBody = false;
 }
@@ -254,7 +254,7 @@ bool checkHeapForTls() {
 
 void refreshHeapSnapshot() {
   KOReaderSyncClient::lastHeapAtFailure = ESP.getFreeHeap();
-  KOReaderSyncClient::lastContigHeapAtFailure = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_DEFAULT);
+  KOReaderSyncClient::lastContigHeapAtFailure = internalContigBytes();
 }
 
 void logTlsAttemptPlan(const char* operation, int attempt) {
@@ -349,11 +349,10 @@ esp_err_t performKoRequest(const char* method, const std::string& url, const cha
   // handshakeMinLargest() moves only when a NEW handshake ran this request (it is
   // untouched on keep-alive reuse), so a change in its value flags a fresh
   // handshake and lets us pair the pre-request largest block with that trough.
-  // Sampled with the same cap (MALLOC_CAP_DEFAULT) the handshake sampler uses so
-  // the "consumed" delta is apples-to-apples. Kept at INFO so it appears in field
-  // bug reports (handshakes are infrequent — one per sync).
+  // Sample the same internal pool used by ordinary malloc/new and the TLS handshake sampler.
+  // This keeps the preflight/trough delta meaningful on PSRAM boards.
   const size_t troughBefore = http->lastHandshakeMinLargest();
-  const size_t preflightLargest = heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT);
+  const size_t preflightLargest = internalContigBytes();
 
   const uint32_t requestStartMs = millis();
   const int rc = http->request(method, url, body);

@@ -1,6 +1,7 @@
 #include "NetworkMemoryTrim.h"
 
 #include <GfxRenderer.h>
+#include <HeapPools.h>
 #include <Logging.h>
 #include <esp_heap_caps.h>
 
@@ -19,7 +20,9 @@ void trimMemoryForNetworkSession(const GfxRenderer& renderer, const char* logTag
     LOG_DBG(logTag, "Reclaimed a lent secondary framebuffer before trimming");
   }
 
-  if (renderer.hasSecondaryBuffer()) {
+  // Only release a secondary buffer when it actually sits in internal RAM. On a PSRAM board it
+  // is external, and the radio's allocations cannot be served from the bytes this would return.
+  if (renderer.hasSecondaryBuffer() && freeingReclaimsInternal(renderer.getFrameBuffer())) {
     // Seed the controller baseline while frameBufferActive is still valid.
     renderer.syncRedRamFromFrameBuffer();
     if (renderer.releaseSecondaryBuffer()) {

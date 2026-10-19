@@ -1,6 +1,8 @@
 #include "CalibreConnectActivity.h"
 
 #include <GfxRenderer.h>
+#include <HalSystem.h>  // feedWatchdog()
+#include <HeapPools.h>
 #include <I18n.h>
 #include <WiFi.h>
 

@@ -23,12 +23,10 @@ static constexpr gpio_num_t GPIO_BATTERY_LATCH = GPIO_NUM_13;
 // Whether this build is allowed to call setCpuFrequencyMhz() at all.
 //
 // On the ESP32-S3 the PSRAM clock is derived from the CPU/APB clock, so changing
-// the CPU frequency while anything is touching PSRAM corrupts those accesses. On
-// the T5S3 that is not a corner case: the 960x540 framebuffer lives in PSRAM, so
-// the render path is in it more or less continuously. It is no better on the X4
-// Pro, whose prebuilt Arduino variant sets CONFIG_SPIRAM_USE_MALLOC with
-// CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096 — every allocation over 4 KB lands in
-// PSRAM — and which runs that PSRAM octal at 80 MHz.
+// the CPU frequency while an explicit PSRAM allocation is in use can corrupt those
+// accesses. The T5S3 framebuffer is external, and the X4 Pro also has explicit
+// PSRAM-resident display/build buffers; ordinary malloc/new remains internal under
+// the firmware's S3 allocator policy.
 //
 // Observed on T5S3 hardware as a TG1WDT_SYS_RST immediately after the "Going to
 // low-power mode" line, on four consecutive boots and then intermittently —

@@ -200,9 +200,15 @@ void SystemInformationActivity::render(RenderLock&&) {
   drawRow(tr(STR_CHIP), status.chipVersion);
   drawRow(tr(STR_CPU), std::to_string(status.cpuFreqMHz) + " " + tr(STR_MHZ));
 
-  drawSection(tr(STR_SEC_MEMORY), 1);
-  drawRow(tr(STR_MEM_COMBINED),
+  drawSection(tr(STR_SEC_MEMORY), status.psramTotalBytes > 0 ? 2 : 1);
+  drawRow(tr(STR_MEM_INTERNAL),
           formatBytesTriple(status.freeHeapBytes, status.minFreeHeapBytes, status.maxAllocHeapBytes));
+  // Only on a board that has the pool; all-zero rows would read as "PSRAM exhausted".
+  if (status.psramTotalBytes > 0) {
+    drawRow(tr(STR_MEM_PSRAM),
+            formatBytesTriple(status.psramFreeBytes, status.psramMinFreeBytes, status.psramMaxAllocBytes) + " of " +
+                formatBytes(status.psramTotalBytes));
+  }
 
   drawSection(tr(STR_SEC_FLASH), status.fontCacheTotalBytes > 0 ? 3 : 2);
   drawRow(tr(STR_APP_PARTITION), formatBytes(status.flashAppPartitionSize));

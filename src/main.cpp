@@ -70,6 +70,48 @@
 #include "util/Timezones.h"
 #include "util/WakeTrace.h"
 
+#if defined(BOARD_HAS_PSRAM) && BOARD_HAS_PSRAM
+// Keep ordinary malloc/new internal: ESP-IDF and Arduino call this to opt into external memory.
+extern "C" void __wrap_heap_caps_malloc_extmem_enable(size_t limit) { (void)limit; }
+
+// Generic capability requests (for example MALLOC_CAP_8BIT) also match PSRAM regions. Require
+// an explicit PSRAM capability before these raw allocation APIs may use external memory.
+static HEAP_IRAM_ATTR inline uint32_t internalUnlessPsramRequested(uint32_t caps) {
+    constexpr uint32_t psramCaps = MALLOC_CAP_SPIRAM | MALLOC_CAP_SPIRAM_NO_ENC;
+    return (caps & psramCaps) != 0 ? caps : caps | MALLOC_CAP_INTERNAL;
+}
+
+extern "C" void* __real_heap_caps_malloc(size_t size, uint32_t caps);
+extern "C" void* __real_heap_caps_calloc(size_t n, size_t size, uint32_t caps);
+extern "C" void* __real_heap_caps_realloc(void* ptr, size_t size, uint32_t caps);
+extern "C" void* __real_heap_caps_aligned_alloc(size_t alignment, size_t size, uint32_t caps);
+extern "C" void* __real_heap_caps_aligned_calloc(
+    size_t alignment, size_t n, size_t size, uint32_t caps);
+
+extern "C" HEAP_IRAM_ATTR void* __wrap_heap_caps_malloc(size_t size, uint32_t caps) {
+    return __real_heap_caps_malloc(size, internalUnlessPsramRequested(caps));
+}
+
+extern "C" HEAP_IRAM_ATTR void* __wrap_heap_caps_calloc(size_t n, size_t size, uint32_t caps) {
+    return __real_heap_caps_calloc(n, size, internalUnlessPsramRequested(caps));
+}
+
+extern "C" HEAP_IRAM_ATTR void* __wrap_heap_caps_realloc(void* ptr, size_t size, uint32_t caps) {
+    return __real_heap_caps_realloc(ptr, size, internalUnlessPsramRequested(caps));
+}
+
+extern "C" HEAP_IRAM_ATTR void* __wrap_heap_caps_aligned_alloc(
+    size_t alignment, size_t size, uint32_t caps) {
+    return __real_heap_caps_aligned_alloc(alignment, size, internalUnlessPsramRequested(caps));
+}
+
+extern "C" HEAP_IRAM_ATTR void* __wrap_heap_caps_aligned_calloc(
+    size_t alignment, size_t n, size_t size, uint32_t caps) {
+    return __real_heap_caps_aligned_calloc(
+        alignment, n, size, internalUnlessPsramRequested(caps));
+}
+#endif
+
 #ifdef ENABLE_BOOT_HEAP_DIAGNOSTICS
 #include <BootHeapProbe.h>
 // Static-init heap probes bracketing this TU's globals (slots 4/5); see BootHeapProbe.h.

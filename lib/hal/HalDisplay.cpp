@@ -4,9 +4,9 @@
 #include <HalDisplay.h>
 #include <HalGPIO.h>
 #include <HalPowerManager.h>
+#include <HeapPools.h>
 #include <Logging.h>
 #include <XteinkDetect.h>  // applyXteinkDisplayController() — see begin()
-#include <esp_heap_caps.h>
 
 #include "HalSpiBus.h"
 
@@ -252,8 +252,17 @@ void HalDisplay::releaseBuffers() {
 
 // FBUF: centralized framebuffer-state trace. Every secondary-buffer / RED-RAM / single-buffer
 // transition logs here so a ghosting regression can be tracked to the exact op that left the panel
-// diffing against the wrong baseline. free=largest contiguous 8-bit block (what a realloc needs).
-static uint32_t fbufContig() { return heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_DEFAULT); }
+// diffing against the wrong baseline. Report contiguous space in the active framebuffer's pool.
+static uint32_t fbufContig(const void* framebuffer) {
+#if defined(BOARD_HAS_PSRAM) && BOARD_HAS_PSRAM
+  if (!freeingReclaimsInternal(framebuffer)) {
+    return static_cast<uint32_t>(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+  }
+#else
+  (void)framebuffer;
+#endif
+  return internalContigBytes();
+}
 
 // `redSynced=` in the FBUF lines is FreeInkDisplay's advisory RED-RAM flag. It exists for the
 // SSD1677's host-managed previous-frame plane; on X3 the facade never sets it (its baseline is
@@ -302,7 +311,7 @@ bool HalDisplay::releaseSecondaryBuffer() {
   LOG_INF("FBUF", "releaseSecondary -> %d (hasSecondary=%d redSynced=%s contig=%lu)", ok ? 1 : 0,
           einkDisplay.hasSecondaryBuffer() ? 1 : 0,
           redSyncedLabel(fastRefreshNeedsHostFrame(), einkDisplay.isRedRamSynced()),
-          static_cast<unsigned long>(fbufContig()));
+          static_cast<unsigned long>(fbufContig(getFrameBuffer())));
   return ok;
 }
 
@@ -312,7 +321,7 @@ bool HalDisplay::reallocSecondaryBuffer() {
   LOG_INF("FBUF", "reallocSecondary -> %d (hasSecondary=%d redSynced=%s contig=%lu)", ok ? 1 : 0,
           einkDisplay.hasSecondaryBuffer() ? 1 : 0,
           redSyncedLabel(fastRefreshNeedsHostFrame(), einkDisplay.isRedRamSynced()),
-          static_cast<unsigned long>(fbufContig()));
+          static_cast<unsigned long>(fbufContig(getFrameBuffer())));
   return ok;
 }
 

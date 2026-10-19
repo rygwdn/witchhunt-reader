@@ -7,6 +7,7 @@
 #include <GfxRenderer.h>
 #include <HalDisplay.h>
 #include <HalStorage.h>
+#include <HeapPools.h>
 #include <I18n.h>
 #include <JpegToBmpConverter.h>
 #include <Logging.h>
@@ -217,21 +218,24 @@ void HomeActivity::giveUpCover(RecentBook& book, ThumbResult res, const std::vec
 void HomeActivity::loadRecentCovers(int coverHeight) {
   recentsLoading = true;
 
-  // Cold-cache cover loading runs the JPEG/PNG decoders, the sliced ZIP inflate and
-  // an EPUB parse — together these can drive free heap to the edge of OOM (observed
-  // Min Free ~2.8 KB) while the ~48 KB secondary framebuffer sits unused. The reader
-  // releases that buffer before decoding for the same reason; do the same here for the
-  // duration of loading and reallocate it once every cover is resolved (see end of this
-  // function) or on exit. Release under the render lock so we never free it mid-render.
-  if (secondaryBufferLent && frameCacheInRegion_) {
+  // Cold-cache cover loading runs the JPEG/PNG decoders, sliced ZIP inflate, and an EPUB parse;
+  // together they can drive free internal heap close to OOM. When freeing the secondary buffer
+  // reclaims internal RAM, borrow it as BuildArena scratch for loading. Home can retain that region
+  // as its carousel frame cache; otherwise it returns the buffer when loading ends or Home exits.
+  // On PSRAM-backed boards lending the buffer relieves no internal-heap pressure, so keep it resident.
+  // Borrow or return it under the render lock so display-buffer ownership never changes mid-render.
+  if (secondaryBufferLent && frameCacheInRegion_ && freeingReclaimsInternal(renderer.getFrameBuffer())) {
     // A later pass on the same visit: the carousel's frame cache has the region; the decoders
     // need it back. (The cache would be rebuilt anyway -- new covers are about to land.)
+    // Do not lend an external framebuffer to cover scratch: its bytes do not relieve internal-heap
+    // pressure, while giving it up costs AA and fast-refresh behavior for the whole load.
     RenderLock lock;
     UITheme::getInstance().getMutableTheme().setFrameCacheRegion(nullptr, 0);
     frameCacheInRegion_ = false;
     coverScratch_ = makeUniqueNoThrow<BuildArena>(lentRegion_, lentRegionBytes_);
     if (!coverScratch_ || !coverScratch_->valid()) coverScratch_.reset();
-  } else if (!secondaryBufferLent && renderer.hasSecondaryBuffer()) {
+  } else if (!secondaryBufferLent && renderer.hasSecondaryBuffer() &&
+             freeingReclaimsInternal(renderer.getFrameBuffer())) {
     RenderLock lock;
     // The lend hands out the DISPLAYED frame and leaves the write buffer as the only one, and
     // after the home render's swap that buffer holds the frame from two refreshes ago -- the

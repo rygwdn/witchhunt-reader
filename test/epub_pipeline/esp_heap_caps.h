@@ -1,7 +1,14 @@
 #pragma once
-// Host stub for <esp_heap_caps.h>. Returns a large constant so every heap gate
-// in the pipeline passes deterministically — control flow must not depend on
-// the host machine's actual memory state.
+// Host stub for <esp_heap_caps.h>.
+//
+// Every query derives from the single ESP stub knob (test/shims/Arduino.h), so a
+// test that simulates heap pressure with ESP.setFreeHeap() moves ALL heap gates
+// together — the ones that call heap_caps_* directly and the ones that go
+// through ESP.getFreeHeap(). Before lib/Memory/HeapPools.h existed these were
+// two independent knobs and a pressure test only moved half the gates.
+// Control flow still never depends on the host machine's real memory state.
+#include <Arduino.h>
+
 #include <cstddef>
 #include <cstdint>
 
@@ -9,29 +16,25 @@
 #define MALLOC_CAP_DEFAULT (1 << 1)
 #define MALLOC_CAP_INTERNAL (1 << 2)
 
-// Settable so a test can put the code under a fragmented heap (see HeapFit.h). Constant otherwise:
-// a test that changes it restores it (HostLargestFreeBlock below).
-inline size_t g_hostLargestFreeBlock = 200 * 1024;
-inline size_t heap_caps_get_largest_free_block(uint32_t /*caps*/) { return g_hostLargestFreeBlock; }
+inline size_t heap_caps_get_largest_free_block(uint32_t /*caps*/) { return ESP.getMaxAllocHeap(); }
+inline size_t heap_caps_get_free_size(uint32_t /*caps*/) { return ESP.getFreeHeap(); }
+inline size_t heap_caps_get_minimum_free_size(uint32_t /*caps*/) { return ESP.getMinFreeHeap(); }
 
 // Scoped override of the largest free block the stub reports.
 struct HostLargestFreeBlock {
-  explicit HostLargestFreeBlock(size_t bytes) : saved_(g_hostLargestFreeBlock) { g_hostLargestFreeBlock = bytes; }
-  ~HostLargestFreeBlock() { g_hostLargestFreeBlock = saved_; }
+  explicit HostLargestFreeBlock(size_t bytes) : saved_(ESP.getMaxAllocHeap()) { ESP.setMaxAllocHeap(bytes); }
+  ~HostLargestFreeBlock() { ESP.setMaxAllocHeap(saved_); }
   HostLargestFreeBlock(const HostLargestFreeBlock&) = delete;
   HostLargestFreeBlock& operator=(const HostLargestFreeBlock&) = delete;
 
  private:
   size_t saved_;
 };
-// Free heap in all, settable the same way (HostFreeHeap below).
-inline size_t g_hostFreeHeap = 300 * 1024;
-inline size_t heap_caps_get_free_size(uint32_t /*caps*/) { return g_hostFreeHeap; }
-
-// Scoped override of the free heap the stub reports.
+// Scoped override of the free heap the stub reports. Routed through the same ESP stub
+// knob as every other gate, so a pressure test moves all of them together.
 struct HostFreeHeap {
-  explicit HostFreeHeap(size_t bytes) : saved_(g_hostFreeHeap) { g_hostFreeHeap = bytes; }
-  ~HostFreeHeap() { g_hostFreeHeap = saved_; }
+  explicit HostFreeHeap(size_t bytes) : saved_(ESP.getFreeHeap()) { ESP.setFreeHeap(bytes); }
+  ~HostFreeHeap() { ESP.setFreeHeap(saved_); }
   HostFreeHeap(const HostFreeHeap&) = delete;
   HostFreeHeap& operator=(const HostFreeHeap&) = delete;
 

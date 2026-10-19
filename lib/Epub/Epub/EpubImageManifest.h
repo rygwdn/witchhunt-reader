@@ -21,8 +21,9 @@ struct ImageDimensions;  // converters/ImageToFramebufferDecoder.h — by refere
 // in memory has a cap that would fail silently past it:
 //   - a resolved image is a 12-byte record (64-bit FNV-1a of its normalised entry path, width,
 //     height) in one sorted array; 1,000 images are 12 KB, not 1,000 path strings on the heap.
-//     The array grows nothrow: when the heap cannot grow it, the image is still answered for
-//     this build, it just is not remembered.
+//     The array grows in internal RAM first, then moves to explicit PSRAM on an S3 when the
+//     internal allocation cannot grow. If neither pool can grow it, the image is still answered
+//     for this build, it just is not remembered.
 //   - an image whose header lies beyond the probe window (Photoshop-style exports: 10-29 KB of
 //     Exif/IPTC/XMP/ICC before SOF) waits in images.pending on the card -- key + ZIP stat, 22 B
 //     each, unbounded -- for the streaming walk. That queue survives a reboot, which is exactly
@@ -100,8 +101,8 @@ class EpubImageManifest {
   // each build's end, which is also when the run of resolves is finished.
   void persistIfDirty();
 
-  // Persist, then give back every heap block the manifest holds (the record array, the kept
-  // resolve handle) and mark it unloaded; Epub::loadImageManifest() rebuilds it from images.bin.
+  // Persist, then release the record array (internal or PSRAM) and the kept resolve handle, and
+  // mark it unloaded; Epub::loadImageManifest() rebuilds it from images.bin.
   // The pending queue lives on the card and is untouched. No build may hold the manifest across
   // this call.
   void releaseMemory();
@@ -113,6 +114,10 @@ class EpubImageManifest {
     int16_t width;
     int16_t height;
   };
+  struct RecordDeleter {
+    void operator()(Record* records) const noexcept;
+  };
+
   static uint64_t keyFor(const std::string& epubEntryPath);
   static uint64_t keyOf(const Record& r) { return (static_cast<uint64_t>(r.keyHi) << 32) | r.keyLo; }
 
@@ -129,8 +134,10 @@ class EpubImageManifest {
   // failed lookups) still releases the handle.
   void closeResolveHandle();
 
-  // Sorted by key. Grown nothrow in steps; see insertEntry.
-  std::unique_ptr<Record[]> records_;
+  using RecordArray = std::unique_ptr<Record[], RecordDeleter>;
+  // Internal first; once growth spills to PSRAM, keep subsequent growth external.
+
+  RecordArray records_;
   uint16_t count_ = 0;
   uint16_t capacity_ = 0;
   std::string cachePath_;

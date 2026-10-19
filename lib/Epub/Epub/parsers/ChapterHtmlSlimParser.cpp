@@ -6,6 +6,7 @@
 #include <GfxRenderer.h>
 #include <HalStorage.h>
 #include <HeapFit.h>
+#include <HeapPools.h>
 #include <Logging.h>
 #include <Memory.h>
 #include <SaxParser/SaxParser.h>
@@ -926,16 +927,16 @@ bool ChapterHtmlSlimParser::ensureHeapForTextLayout(const char* phase, const Par
   // A block that could not grow its word vectors is already missing words; laying it out would
   // write a silently truncated paragraph into the cache. Same exit as the floors below.
   if (block != nullptr && block->wordGrowthRefused()) {
-    LOG_ERR("EHP", "Word vector growth refused (%u free, %u max alloc), aborting parse before %s", ESP.getFreeHeap(),
-            ESP.getMaxAllocHeap(), phase);
+    LOG_ERR("EHP", "Word vector growth refused (%u free, %u max alloc), aborting parse before %s", internalFreeBytes(),
+            internalContigBytes(), phase);
     streamFailed = true;
     layoutFailed = true;
     saxParser_.stop();
     return false;
   }
 
-  const uint32_t freeHeap = ESP.getFreeHeap();
-  const uint32_t maxAllocHeap = ESP.getMaxAllocHeap();
+  const uint32_t freeHeap = internalFreeBytes();
+  const uint32_t maxAllocHeap = internalContigBytes();
   if (freeHeap >= MIN_FREE_HEAP_FOR_TEXT_LAYOUT && maxAllocHeap >= MIN_MAX_ALLOC_FOR_TEXT_LAYOUT) {
     return true;
   }
@@ -1008,8 +1009,8 @@ bool ChapterHtmlSlimParser::ensureHeapForTextLayout(const char* phase, const Par
 // See the note by MAX_TABLE_ROW_BUFFER_BYTES for why the heap is sampled here, immediately before
 // the allocations, rather than as cells accumulate.
 bool ChapterHtmlSlimParser::heapAllowsTableRowLayout() const {
-  const uint32_t freeHeap = ESP.getFreeHeap();
-  const uint32_t maxAllocHeap = ESP.getMaxAllocHeap();
+  const uint32_t freeHeap = internalFreeBytes();
+  const uint32_t maxAllocHeap = internalContigBytes();
   // Free heap uses the SOFT text-layout floor (see the note by MAX_TABLE_ROW_BUFFER_BYTES for why
   // not the hard one). The contiguous bar is deliberately NOT the matching soft value.
   //
@@ -1050,8 +1051,8 @@ bool ChapterHtmlSlimParser::heapAllowsTableRowLayout() const {
 }
 
 bool ChapterHtmlSlimParser::heapAllowsImageHeaderRead() const {
-  const uint32_t freeHeap = ESP.getFreeHeap();
-  const uint32_t maxAllocHeap = ESP.getMaxAllocHeap();
+  const uint32_t freeHeap = internalFreeBytes();
+  const uint32_t maxAllocHeap = internalContigBytes();
   // Content-dropping floor (alt text instead of the image), so it carries the allocator slack
   // like every other one in this file: a largest-free-block reading is never the round number.
   const bool ok = freeHeap >= MIN_FREE_HEAP_FOR_IMAGE_HEADER &&
@@ -4274,8 +4275,8 @@ bool ChapterHtmlSlimParser::setup(const size_t totalInflatedSize) {
     progressStepPercent = 50;
   }
 
-  const uint32_t popupFreeHeap = ESP.getFreeHeap();
-  const uint32_t popupContigHeap = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_DEFAULT);
+  const uint32_t popupFreeHeap = internalFreeBytes();
+  const uint32_t popupContigHeap = internalContigBytes();
   progressUiEnabled =
       popupFreeHeap >= MIN_FREE_HEAP_FOR_INDEXING_POPUP && popupContigHeap >= MIN_CONTIG_HEAP_FOR_INDEXING_POPUP;
   if (!progressUiEnabled) {

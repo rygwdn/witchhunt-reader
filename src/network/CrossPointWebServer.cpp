@@ -10,6 +10,7 @@
 #include <HalPowerManager.h>
 #include <HalStorage.h>
 #include <HalSystem.h>  // feedWatchdog()
+#include <HeapPools.h>
 #include <Logging.h>
 #include <Memory.h>
 #include <Txt.h>
@@ -50,10 +51,12 @@
 #include "util/FontManifestReader.h"
 #include "util/PluginLocations.h"
 
-// Log free heap + max contiguous block at a named point.
-#define LOG_WEB_MEM(tag)                                                                             \
-  LOG_DBG("WEB", "[MEM] %s — free=%lu maxAlloc=%lu", (tag), (unsigned long)esp_get_free_heap_size(), \
-          (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_DEFAULT))
+// Log free heap + max contiguous block at a named point. Same pool the reject gate
+// below measures: this trace exists to explain a rejection, and a combined-pool
+// number next to an internal-pool decision explains nothing on an S3.
+#define LOG_WEB_MEM(tag)                                                                        \
+  LOG_DBG("WEB", "[MEM] %s — free=%lu maxAlloc=%lu", (tag), (unsigned long)internalFreeBytes(), \
+          (unsigned long)internalContigBytes())
 
 // Minimum free heap to attempt serving a response. Below this threshold the
 // WebServer library's internal malloc(11) for chunked chunk-size headers fails
@@ -76,7 +79,10 @@ static void sendLowMemory(WebServer* server) {
 }
 
 static bool rejectIfLowMemory(WebServer* server, uint32_t minAlloc = MIN_HEAP_FOR_JSON) {
-  const uint32_t avail = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_DEFAULT);
+  // These allocations use ordinary malloc/new and remain internal under the S3 default
+  // allocator policy. Measuring the combined pool would hide internal-RAM pressure and
+  // could allow malformed HTTP instead of returning a 503 with Retry-After.
+  const uint32_t avail = internalContigBytes();
   if (avail >= minAlloc) {
     return false;
   }
@@ -973,6 +979,11 @@ void CrossPointWebServer::handleStatus() const {
   doc["freeHeap"] = status.freeHeapBytes;
   doc["minFreeHeap"] = status.minFreeHeapBytes;
   doc["maxAllocHeap"] = status.maxAllocHeapBytes;
+  // Zero on a board without PSRAM; the page hides the row on psramTotal == 0.
+  doc["psramTotal"] = status.psramTotalBytes;
+  doc["psramFree"] = status.psramFreeBytes;
+  doc["psramMinFree"] = status.psramMinFreeBytes;
+  doc["psramMaxAlloc"] = status.psramMaxAllocBytes;
   doc["flashTotal"] = status.flashBytes;
   doc["appPartitionSize"] = status.flashAppPartitionSize;
   doc["batteryPercent"] = status.batteryPercent;
@@ -1011,6 +1022,10 @@ void CrossPointWebServer::handleStatusFast() const {
   doc["freeHeap"] = status.freeHeapBytes;
   doc["minFreeHeap"] = status.minFreeHeapBytes;
   doc["maxAllocHeap"] = status.maxAllocHeapBytes;
+  doc["psramTotal"] = status.psramTotalBytes;
+  doc["psramFree"] = status.psramFreeBytes;
+  doc["psramMinFree"] = status.psramMinFreeBytes;
+  doc["psramMaxAlloc"] = status.psramMaxAllocBytes;
   doc["flashTotal"] = status.flashBytes;
   doc["appPartitionSize"] = status.flashAppPartitionSize;
   doc["batteryPercent"] = status.batteryPercent;

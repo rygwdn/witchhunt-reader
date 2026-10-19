@@ -68,7 +68,8 @@
 
       <section class="card">
         <h2>Memory and flash</h2>
-        <div class="info-row"><span class="label">Heap free / min / max</span><span class="value" id="heap-combined">Loading...</span></div>
+        <div class="info-row"><span class="label">Internal — Free / Min / Max</span><span class="value" id="heap-internal">Loading...</span></div>
+        <div class="info-row" id="psram-row" style="display: none;"><span class="label">PSRAM — Free / Min / Max</span><span class="value" id="psram-triple">Loading...</span></div>
         <div class="info-row"><span class="label">App partition</span><span class="value" id="app-partition-size">Loading...</span></div>
         <div class="info-row"><span class="label">Total flash</span><span class="value" id="flash-total">Loading...</span></div>
       </section>
@@ -145,8 +146,19 @@
       wifiStatus.textContent = data.mode || 'N/A';
       document.getElementById('ip-address').textContent = data.ip || 'N/A';
       document.getElementById('mac-address').textContent = data.macAddress || 'N/A';
-      document.getElementById('heap-combined').textContent =
+      document.getElementById('heap-internal').textContent =
         formatBytesTriple(data.freeHeap, data.minFreeHeap, data.maxAllocHeap);
+      // psramTotal == 0 means "this board has no PSRAM", so the row stays hidden rather
+      // than reporting three zeros as if the pool existed and were exhausted.
+      const psramRow = document.getElementById('psram-row');
+      if (data.psramTotal) {
+        document.getElementById('psram-triple').textContent =
+          formatBytesTriple(data.psramFree, data.psramMinFree, data.psramMaxAlloc) +
+          ' of ' + formatBytes(data.psramTotal);
+        psramRow.style.display = '';
+      } else {
+        psramRow.style.display = 'none';
+      }
       document.getElementById('app-partition-size').textContent = data.appPartitionSize != null
         ? formatBytes(data.appPartitionSize)
         : 'N/A';

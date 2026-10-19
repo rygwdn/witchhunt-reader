@@ -68,8 +68,8 @@ class SecureClient : public Client {
   // a TLS record (wolfSSL MEMORY_E). Cleared by the next connect().
   bool lastReadWasOutOfMemory() const;
 
-  // Heap low-water sampled ACROSS the last handshake (free bytes / largest
-  // contiguous block). Distinct from ESP.getMinFreeHeap() (all-time since boot):
+  // Heap low-water sampled across the last handshake (internal free bytes / largest
+  // internal contiguous block). Distinct from ESP.getMinFreeHeap() (all-time since boot):
   // this isolates what the TLS handshake itself cost. SIZE_MAX until a connect runs.
   size_t handshakeMinFree() const { return _handshakeMinFree; }
   size_t handshakeMinLargest() const { return _handshakeMinLargest; }

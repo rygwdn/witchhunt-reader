@@ -2,7 +2,7 @@
 
 #include <Arduino.h>  // micros(), getCpuFrequencyMhz() for the handshake cost split
 #include <Logging.h>
-#include <esp_heap_caps.h>
+#include <HeapPools.h>
 
 // wolfSSL is only pulled in when explicitly enabled, keeping flag-off builds
 // (and host tests) free of the dependency. See SecureClient.h.
@@ -271,12 +271,12 @@ int SecureClient::connectWithMethod(const char* host, uint16_t port, void* metho
   }
 
   // Non-blocking recv => retry wolfSSL_connect across handshake round-trips.
-  // Sample the heap low-water across the handshake (this is where ECC/RSA bignum
-  // allocations peak) so callers can report the handshake's real heap trough,
-  // distinct from the all-time ESP.getMinFreeHeap() figure.
+  // Sample the internal low-water mark across the handshake (this is where ECC/RSA bignum
+  // allocations peak). Ordinary malloc/new remains internal on PSRAM boards, so a combined
+  // heap query would report unused external RAM rather than the pool the handshake can exhaust.
   auto sampleHeapTrough = [this]() {
-    const size_t freeNow = esp_get_free_heap_size();
-    const size_t largestNow = heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT);
+    const size_t freeNow = internalFreeBytes();
+    const size_t largestNow = internalContigBytes();
     if (freeNow < _handshakeMinFree) _handshakeMinFree = freeNow;
     if (largestNow < _handshakeMinLargest) _handshakeMinLargest = largestNow;
   };

@@ -132,24 +132,21 @@ class KOReaderSyncClient {
   static int lastEspError;
   /** Free heap (bytes) captured at the start of the last failing request. */
   static unsigned lastHeapAtFailure;
-  /** Largest contiguous free block (bytes) at the start of the last failing request. */
+  /** Internal largest contiguous free block (bytes) at the start of the last failing request. */
   static unsigned lastContigHeapAtFailure;
   /** Operation tag set at the start of each request, surfaced in lastFailureDetail. */
   static const char* lastOperation;
 
   /**
-   * Minimum largest-contiguous-free heap block (bytes) required before attempting
+   * Minimum internal largest-contiguous-free block required before attempting
    * a request. Below this, the client refuses with NETWORK_ERROR and lastFailureDetail
    * reports a heap-pressure message instead of attempting a doomed TLS handshake.
    *
    * Sized from field telemetry (the "TLS handshake heap" INFO line in
    * performKoRequest): the wolfSSL TLS 1.3 handshake's peak contiguous demand was
    * 12 KB (sync.koreader.rocks) to 16 KB (kosync.rustysoft.de) across register/GET/PUT.
-   * 16 KB is effectively the ceiling — it is wolfSSL's max TLS input-record buffer.
-   * 26 KB leaves ~10 KB margin over that worst case (for cert-chain variance and any
-   * transient bignum peak the sampler may miss between wolfSSL_connect() iterations).
-   * Was 36 KB, an mbedTLS-era figure that refused syncs a wolfSSL handshake would
-   * have completed comfortably.
+   * Ordinary malloc/new allocations stay internal on PSRAM boards, so this gate protects
+   * the internal pool the handshake uses.
    */
   static constexpr unsigned MIN_CONTIG_HEAP_FOR_TLS = 26 * 1024;
   // Relaxed threshold only for upload when reusing an already-established session.

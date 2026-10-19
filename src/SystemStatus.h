@@ -5,6 +5,7 @@
 #include <FlashFontPartition.h>
 #include <HalCapabilities.h>
 #include <HalStorage.h>
+#include <HeapPools.h>
 #include <Logging.h>
 #include <WiFi.h>
 #include <esp_heap_caps.h>
@@ -68,9 +69,19 @@ struct SystemStatus {
   std::string wifiMode;  // "STA", "AP", or "Off"
   int rssi;              // dBm; 0 when not in STA mode
   std::string macAddress;
+  // The on-chip pool under allocation pressure: task stacks, DMA buffers, and ordinary
+  // malloc/new allocations. On the C3 it is the whole heap. All three numbers use this
+  // same pool — maxAllocHeapBytes historically read MALLOC_CAP_8BIT, which on an S3
+  // included PSRAM and mixed a large external block with free internal RAM.
   uint32_t freeHeapBytes;
   uint32_t minFreeHeapBytes;
   uint32_t maxAllocHeapBytes;
+  // External RAM. All zero on a board without PSRAM, which is how the surfaces
+  // decide whether to show the row at all.
+  uint32_t psramTotalBytes;
+  uint32_t psramFreeBytes;
+  uint32_t psramMinFreeBytes;
+  uint32_t psramMaxAllocBytes;
   uint64_t flashBytes;             // Total flash chip size
   uint64_t flashAppPartitionSize;  // Size of the running OTA app partition
   uint16_t batteryPercent;
@@ -120,9 +131,16 @@ struct SystemStatus {
     s.chipVersion += " rev ";
     s.chipVersion += std::to_string(ESP.getChipRevision());
     s.cpuFreqMHz = static_cast<uint32_t>(getCpuFrequencyMhz());
-    s.freeHeapBytes = ESP.getFreeHeap();
-    s.minFreeHeapBytes = ESP.getMinFreeHeap();
-    s.maxAllocHeapBytes = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    // Same pool for all three, via the shared helpers the memory gates use.
+    s.freeHeapBytes = internalFreeBytes();
+    s.minFreeHeapBytes = internalMinEverFreeBytes();
+    s.maxAllocHeapBytes = internalContigBytes();
+    // The Arduino wrappers already gate on psramFound(), so these return 0 — and
+    // compile — on a board without PSRAM; no #if needed here.
+    s.psramTotalBytes = ESP.getPsramSize();
+    s.psramFreeBytes = ESP.getFreePsram();
+    s.psramMinFreeBytes = ESP.getMinFreePsram();
+    s.psramMaxAllocBytes = ESP.getMaxAllocPsram();
     s.flashBytes = static_cast<uint64_t>(ESP.getFlashChipSize());
     // ESP.getSketchSize() is unreliable on custom partition layouts (the
     // underlying esp_image_verify() call silently fails), so we report the

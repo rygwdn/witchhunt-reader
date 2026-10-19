@@ -3,6 +3,7 @@
 #include <FsHelpers.h>
 #include <HalStorage.h>
 #include <HeapFit.h>
+#include <HeapPools.h>
 #include <Logging.h>
 #include <Memory.h>
 #include <Serialization.h>
@@ -1943,8 +1944,8 @@ bool Section::heapAllowsEmbeddedStyle(const size_t cssRuleCount, const bool aren
   const uint32_t requiredContig =
       std::max<uint32_t>(EMBEDDED_STYLE_MIN_CONTIG_HEAP_BYTES,
                          static_cast<uint32_t>(cssRuleCount * CssParser::CSS_INDEX_BYTES_PER_RULE) + 8 * 1024);
-  const uint32_t freeHeap = esp_get_free_heap_size();
-  const uint32_t contigHeap = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_DEFAULT);
+  const uint32_t freeHeap = internalFreeBytes();
+  const uint32_t contigHeap = internalContigBytes();
   // Output-changing refusal (a no-CSS variant), so the contig bar carries the allocator slack.
   return freeHeap >= EMBEDDED_STYLE_MIN_FREE_HEAP_BYTES && contigHeap + LARGEST_FREE_BLOCK_SLACK >= requiredContig;
 }

@@ -1,6 +1,7 @@
 #include "BookMetadataCache.h"
 
 #include <BuildArena.h>
+#include <HeapPools.h>
 #include <Logging.h>
 #include <Memory.h>
 #include <PassTable.h>
@@ -361,7 +362,7 @@ bool BookMetadataCache::buildBookBin(const std::string& epubPath, const BookMeta
   const size_t perWalk = lookup.capacity();
   if (batched && perWalk == 0) {
     LOG_INF("BMC", "No room for a size table (free %u); per-item size lookup for %d spine items",
-            static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)), spineCount);
+            static_cast<unsigned>(internalFreeBytes()), spineCount);
   }
   std::string pathScratch;
   int walks = 0;

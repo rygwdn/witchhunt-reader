@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <FontCacheManager.h>
 #include <GfxRenderer.h>
+#include <HeapPools.h>
 #include <I18n.h>
 #include <Logging.h>
 
@@ -70,13 +71,16 @@ void SerialTransferActivity::onEnter() {
 
   // Under memory pressure, free the secondary framebuffer (the primary stays so
   // we can still paint status updates). We silentRestart() on exit to rebuild it.
+  // The gate measures internal RAM, so only release the buffer when it is internal
+  // too — on a PSRAM board it is external and freeing it relieves nothing.
   if (ESP.getFreeHeap() < kLowHeapTrimThreshold) {
     if (auto* cache = renderer.getFontCacheManager()) cache->clearCache();
     // Seed RED RAM with the displayed frame before the release, as the X4's single-buffer fast
     // diff requires (no-op on X3); the lock keeps a status repaint off the bus meanwhile.
     RenderLock lock;
     if (renderer.hasSecondaryBuffer()) renderer.syncRedRamFromFrameBuffer();
-    if (renderer.hasSecondaryBuffer() && renderer.releaseSecondaryBuffer()) {
+    if (renderer.hasSecondaryBuffer() && freeingReclaimsInternal(renderer.getFrameBuffer()) &&
+        renderer.releaseSecondaryBuffer()) {
       renderer.setSingleBufferFastDiff(true);
       LOG_DBG("SXF", "Released secondary framebuffer under low heap (free=%u)",
               static_cast<unsigned>(ESP.getFreeHeap()));
