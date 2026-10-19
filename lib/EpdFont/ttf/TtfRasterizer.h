@@ -1,5 +1,7 @@
 #pragma once
 
+#include <ColdBuffer.h>
+
 #include <cstdint>
 #include <memory>
 
@@ -68,7 +70,7 @@ class Rasterizer {
   /// Plans the scratch block without making it: scratchBytes() is its size from then on. False when a part is out of
   /// range (logged); the plan before stays.
   bool setPlan(const ScratchPlan& plan);
-  /// Makes the planned block on the heap, held until release(). False on OOM.
+  /// Makes cold working storage and internal output storage, held until release(). False on OOM.
   bool allocate();
   /// setPlan(), then allocate().
   bool allocate(const ScratchPlan& plan);
@@ -80,9 +82,13 @@ class Rasterizer {
   bool allocated() const { return block_ != nullptr; }
   /// The planned block's size, made or not.
   uint32_t scratchBytes() const { return blockBytes_; }
+  /// The part of the scratch block in PSRAM: the working region, which is cold (a glyph miss reads
+  /// it) and rebuildable. The output region stays in the ordinary heap, because it is the batch
+  /// buffer the glyph log is written from.
+  uint32_t scratchExternalBytes() const { return work_.external() ? work_.size() : 0; }
   const ScratchPlan& plan() const { return plan_; }
   /// The output region, plan().outputBytes long: render() leaves its bitmap here.
-  uint8_t* output() { return block_ ? block_ + outputOffset_ : nullptr; }
+  uint8_t* output() { return outputData_; }
 
   /// Loads `glyph` of `face` at `ppem26_6` into the scratch block and fills `metrics`: width, height, left
   /// and top of FreeType's unhinted bitmap, advanceX (12.4) as the .cpfont converter derives it, and
@@ -98,8 +104,10 @@ class Rasterizer {
  private:
   struct Loader;
 
-  uint8_t* block_ = nullptr;          // owned_, or the caller's (attach())
-  std::unique_ptr<uint8_t[]> owned_;  // what allocate() made
+  uint8_t* block_ = nullptr;       // work_'s storage, or the caller's (attach())
+  uint8_t* outputData_ = nullptr;  // output_'s storage, or the tail of the caller's block
+  ColdBuffer work_;               // cold working storage on the fallback path
+  std::unique_ptr<uint8_t[]> output_;  // internal batch buffer for flash writes
   uint32_t blockBytes_ = 0;
   ScratchPlan plan_;
   uint32_t pointsOffset_ = 0;

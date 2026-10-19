@@ -337,11 +337,17 @@ bool Rasterizer::setPlan(const ScratchPlan& plan) {
 
 bool Rasterizer::allocate() {
   if (block_ || blockBytes_ == 0) return block_ != nullptr;  // made already, or nothing planned
-  // One block, not one per glyph: a cell pool and outline arrays on the loop task's stack would take 4-10 KB of its
-  // 16 KB, and per-glyph allocations would fragment the heap.
-  owned_ = makeUniqueNoThrow<uint8_t[]>(blockBytes_);
-  if (!owned_) return false;  // the caller says what went without it
-  attach(owned_.get());
+  // Only a miss without a lent arena makes these blocks. The cold work region may use PSRAM;
+  // the output stays internal so flash programming does not need per-512-byte staging copies.
+  if (!work_.allocate(outputOffset_, 8)) return false;
+  output_ = makeUniqueNoThrow<uint8_t[]>(plan_.outputBytes);
+  if (!output_) {
+    work_.reset();
+    return false;
+  }
+  block_ = work_.data();
+  outputData_ = output_.get();
+  loaded_ = Status::Transient;
   return true;
 }
 
@@ -349,12 +355,15 @@ bool Rasterizer::allocate(const ScratchPlan& plan) { return setPlan(plan) && all
 
 void Rasterizer::attach(uint8_t* block) {
   block_ = block;
+  outputData_ = block ? block + outputOffset_ : nullptr;
   loaded_ = Status::Transient;
 }
 
 void Rasterizer::release() {
   block_ = nullptr;
-  owned_.reset();
+  outputData_ = nullptr;
+  work_.reset();
+  output_.reset();
   loaded_ = Status::Transient;
 }
 

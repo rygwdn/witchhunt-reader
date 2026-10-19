@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstring>
 #include <new>
+#include <type_traits>
 
 using glyphstore::kIdentityBytes;
 using Commit = FlashGlyphStore::Commit;
@@ -407,9 +408,11 @@ void TtfFontSet::noMemory(const uint32_t codepoint) {
 }
 
 bool TtfFontSet::heapPages() {
-  ownedPages_ = makeUniqueNoThrow<ttf::SdPageCache>();
-  usePages(ownedPages_.get());
-  return sdPages_ != nullptr;
+  // Cold and rebuildable, but allocated only on a miss when no lent arena can hold it.
+  static_assert(std::is_trivially_destructible_v<ttf::SdPageCache>);
+  if (!sdPagesStorage_.allocate(sizeof(ttf::SdPageCache), alignof(ttf::SdPageCache))) return false;
+  usePages(new (sdPagesStorage_.data()) ttf::SdPageCache());
+  return true;
 }
 
 void TtfFontSet::usePages(ttf::SdPageCache* pages) {
@@ -423,17 +426,17 @@ void TtfFontSet::usePages(ttf::SdPageCache* pages) {
 
 uint32_t TtfFontSet::missMemoryBytes() const {
   return (rasterizer_.allocated() ? rasterizer_.scratchBytes() : 0) +
-         (ownedPages_ ? static_cast<uint32_t>(sizeof(ttf::SdPageCache)) : 0) + ringBytes();
+         (sdPagesStorage_.valid() ? static_cast<uint32_t>(sizeof(ttf::SdPageCache)) : 0) + ringBytes();
 }
 
 uint32_t TtfFontSet::releaseMissMemory() {
   missesStarved_ = false;                                                      // the next pass asks the heap again
-  if (!rasterizer_.allocated() && !ownedPages_ && ringBytes() == 0) return 0;  // as RenderLock goes back, mostly
+  if (!rasterizer_.allocated() && !sdPagesStorage_.valid() && ringBytes() == 0) return 0;
   const uint32_t freed = missMemoryBytes();
   rasterizer_.release();
   if (sdPages_) sdPageReads_ += sdPages_->misses();
   usePages(nullptr);
-  ownedPages_.reset();
+  sdPagesStorage_.reset();
   freeRing();
   return freed;
 }
@@ -452,14 +455,14 @@ const EpdGlyph* TtfFontSet::drawToRing(const EpdGlyph& metrics) {
     for (uint8_t age = 1; age < kRingSlots && ringBytes() + metrics.dataLength > kRingBudgetBytes; ++age) {
       freeRingSlot(static_cast<uint8_t>((slot + age) % kRingSlots));  // the slot after this one is the oldest
     }
-    ringBitmaps_[slot] = makeUniqueNoThrow<uint8_t[]>(metrics.dataLength);
-    ringCapacity_[slot] = ringBitmaps_[slot] ? metrics.dataLength : 0;
-    if (!ringBitmaps_[slot]) {
+    ringBitmaps_[slot].allocate(metrics.dataLength, 1);
+    ringCapacity_[slot] = ringBitmaps_[slot].valid() ? metrics.dataLength : 0;
+    if (!ringBitmaps_[slot].valid()) {
       LOG_ERR("TTF", "ring: no %u B for a glyph", static_cast<unsigned>(metrics.dataLength));
       return nullptr;
     }
   }
-  if (metrics.dataLength > 0 && rasterizer_.rasterize(ringBitmaps_[slot].get()) != ttf::Status::Ok) return nullptr;
+  if (metrics.dataLength > 0 && rasterizer_.rasterize(ringBitmaps_[slot].data()) != ttf::Status::Ok) return nullptr;
   ringGlyphs_[slot] = metrics;
   ringGlyphs_[slot].dataOffset = 0;
   return &ringGlyphs_[slot];
@@ -486,7 +489,7 @@ bool TtfFontSet::ownsBitmap(const EpdGlyph* glyph, const uint8_t*& bitmap) const
   const auto first = reinterpret_cast<uintptr_t>(ringGlyphs_);
   if (at >= first && at < first + sizeof ringGlyphs_) {
     const uint32_t slot = static_cast<uint32_t>((at - first) / sizeof(EpdGlyph));
-    bitmap = ringGlyphs_[slot].dataLength > 0 ? ringBitmaps_[slot].get() : nullptr;
+    bitmap = ringGlyphs_[slot].dataLength > 0 ? ringBitmaps_[slot].data() : nullptr;
     return true;
   }
   if (glyph == &kIgnorable) {

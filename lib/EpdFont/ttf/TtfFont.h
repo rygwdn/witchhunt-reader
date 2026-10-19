@@ -1,6 +1,7 @@
 #pragma once
 
 #include <BuildArena.h>
+#include <ColdBuffer.h>
 #include <NorFlash.h>
 
 #include <cstdint>
@@ -320,7 +321,7 @@ class TtfFontSet {
   void freeRingSlot(uint8_t slot);
   void freeRing();
   bool ownsBitmap(const EpdGlyph* glyph, const uint8_t*& bitmap) const;
-  void failed(uint8_t style, uint32_t codepoint, ttf::Status status, bool haveKey, uint32_t key);
+  void failed(uint8_t style, uint32_t codepoint, const ttf::Status status, const bool haveKey, const uint32_t key);
   void noteCommit(FlashGlyphStore::Commit result);
   uint32_t batchCapacity() const { return rasterizer_.plan().outputBytes; }
   bool beginMiss();
@@ -332,9 +333,9 @@ class TtfFontSet {
   NorFlash& flash_;
   FlashGlyphStore store_;
   ttf::Rasterizer rasterizer_;
-  // SD mode's page cache while a miss has one: ownedPages_, or a lookup's block of the lent arena.
+  // SD mode's page cache while a miss has one: cold owned storage, or a lookup's block of the lent arena.
   ttf::SdPageCache* sdPages_ = nullptr;
-  std::unique_ptr<ttf::SdPageCache> ownedPages_;
+  ColdBuffer sdPagesStorage_;
   uint32_t sdPageReads_ = 0;        // the pages caches given back since load() read
   BuildArena* lentFrom_ = nullptr;  // the arena the lookup in progress draws in, if any
   BuildArena::Block lent_;
@@ -346,7 +347,7 @@ class TtfFontSet {
 
   // The ring: glyphs drawn without being stored. Their records live until the slot is reused, 8 lookups later.
   EpdGlyph ringGlyphs_[kRingSlots] = {};
-  std::unique_ptr<uint8_t[]> ringBitmaps_[kRingSlots];
+  ColdBuffer ringBitmaps_[kRingSlots];
   uint16_t ringCapacity_[kRingSlots] = {};
   uint8_t ringNext_ = 0;
 

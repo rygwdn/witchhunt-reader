@@ -800,7 +800,14 @@ Stage 2 plans:
   - **One render at a time:** `ftgrays`' standalone raster object is a static. Assert `RenderLock` around
     every `Rasterizer` call (debug builds); overlapping renders could overflow a pool.
   - **Tricky fonts:** the registry refuses FreeType's bytecode-assembled "tricky" fonts (5.6).
-  - **S3:** a scratch block over 4 KB lands in PSRAM unless allocated internal.
+  - **S3:** a scratch block over 4 KB lands in PSRAM unless allocated internal. **Decided
+    (2026-10-19, §8.1):** the scratch block is split in two. The working region (the cell pool, the
+    points, the contours and the tags) is cold — only a glyph the store has not rendered yet reads it,
+    and it is rebuilt on every miss — so it goes to PSRAM where the board has it. The output region
+    (the batch buffer the glyph log is written from) stays in the ordinary heap: `EspNorFlash::program`
+    copies an external source through 512 B, at one write call per 512 B, and the log is written in one
+    call. The SD mode page cache and the ring's bitmaps go the same way as the working region. On the C3
+    nothing moves: the ordinary heap is its only pool.
 - **Optional:** a `prefetch(text)` virtual on `GlyphProvider` (no-op by default) would let
   `ensureFontReady` and `prewarmCache` reach `TtfFont` through `family->getData(style)->provider`,
   without a font-ID-to-TtfFont registry.
@@ -820,7 +827,9 @@ Stage 2 plans:
   - **The drop cap:** native up to the family's ceiling, scaled above it (5.5).
 - **Done in 2c-3 (2026-10-16):** kerning pairs in the store's pair index (font units, codepoint keys) and the
   coverage pre-check: a pair whose left glyph kerns with nothing is never stored (5.4).
-- **Still open, by plan:** tricky fonts and the S3's internal-RAM scratch (2c-4); the `sdRecord` rename. Done in 2c-4
+- **Still open, by plan:** tricky fonts and the `sdRecord` rename. The S3's internal-RAM scratch was decided on
+  2026-10-19 (8.1): the scratch block is split, the working region in PSRAM and the output region (the batch
+  buffer) in internal RAM. Done in 2c-4
   (8.2): `cmapEnd`-bounded format-4 reads, the SD-mode record-size planner input; grouping a page's misses by style
   was done by Stage B (11.1.2: one prefetch call per family and style).
 - **For 2c-2, from the 2c-1 device run (done in 2c-2):** a drop cap is drawn at about 4x the body size (a 16 pt body gives
@@ -946,8 +955,8 @@ others read from the card. Built on Stage B phase 3 (PR #503, 11.1.3). Previews 
     (0 kept, 0 in SD mode)", as before SD mode: 53.2 KB free (43.0). Body Text 55.5-56.0 KB (22.5), as phase 3.
   - Home 76.5 KB after every mode. No errors from the store, the engine or the flash; the Background-C fall-back for
     low heap in Off and Body Text is phase 2's (11.1.2).
-- **Left open:** previews of a family not installed (7.6); tricky fonts and the S3's internal-RAM scratch (8.1);
-  the install reads each SD-mode file's directory up to three times (planning, the kept
+- **Left open:** previews of a family not installed (7.6); tricky fonts (8.1); the install reads each
+  SD-mode file's directory up to three times (planning, the kept
   check, the copy), a few small reads each; the forward-read order holds within a prefetch batch, not across them
   (the CJK chapter read 2.5 pages a glyph).
 

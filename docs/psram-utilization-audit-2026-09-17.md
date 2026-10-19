@@ -636,6 +636,35 @@ framebuffer now explicitly requests PSRAM by default (§10), so the earlier ordi
 placement check no longer describes its default firmware. Broader P0.3 hardware confirmation
 remains pending.
 
+### P0.4 — the TrueType font path's cold memory leaves the internal pool
+
+On a board with PSRAM, the TrueType set's miss-only memory now lives in PSRAM: the rasterizer's
+working region (ftgrays' cell pool, the points, the contours and the tags), the SD mode page cache,
+and the ring's bitmaps. The rasterizer's *output* region stays in the ordinary heap: it is the
+batch buffer the glyph log is programmed from, and `EspNorFlash::program` copies an external source
+through 512 B, at one write call per 512 B (`EspNorFlash.cpp:64-78`), so the log is written at full
+speed from internal RAM. The native sizes (540 B each) stay there too: they are on the hot path.
+
+The placement is `lib/Memory/ColdBuffer.h`: PSRAM where the board has it, the ordinary heap — the
+internal pool, under P0.3 — where it does not, or where PSRAM is full. A cold buffer is read only
+when something is missing (a glyph the store has not rendered yet) and is rebuilt on every miss, so
+a font that loads from the pool it was meant to spare beats a font that does not load. The C3 is
+unchanged: the ordinary heap is its only pool.
+
+What moves: the working region is 8-14 KB (the pool is 4-8 KB, the points, contours and tags up to
+about 5.6 KB), the SD mode page cache is 4,204 B and only exists in SD mode, and the ring is at most
+8 KB and only exists once the store has filled up. So 8-26 KB of the internal pool, depending on
+the mode, while a TrueType set is loaded — the bytes the page's image decode competes for. The
+split is in the log: "N B scratch (M B external)".
+
+Not measured on a device yet. The reader's memory ladder is unaffected in practice: its LightRelief
+frees the miss memory, which on a PSRAM board is no longer internal RAM, so the relief no longer
+hands the decode internal bytes — but on the S3 the ladder does not run in the first place (the
+internal pool holds 130-190 KB against a decode floor of 16-28 KB, and the JPEG work pool is already
+served from the PSRAM image scratch arena). If a device does show the ladder running on an S3, the
+fix is the decode's own buffers (the pixel cache band, the row read buffer, the dither band), not
+the font's.
+
 ### Still open
 
 - §7.1 now covers every large allocation exercised by the X4 probe except the transient BW
