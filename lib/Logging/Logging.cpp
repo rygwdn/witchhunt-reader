@@ -23,12 +23,23 @@ RTC_NOINIT_ATTR size_t logHead = 0;
 // value is only set by clearLastLogs(), so its absence means the buffer was
 // never properly initialized.
 RTC_NOINIT_ATTR uint32_t rtcLogMagic;
+// Per-boot sequence for incremental SD flushes; the RTC ring itself remains the
+// source of crash logs across resets.
+static uint32_t logSequence = 0;
 static constexpr uint32_t LOG_RTC_MAGIC = 0xDEADBEEF;
 
 // When true, LOG_* output is withheld from the serial wire (still ring-buffered).
 // Single writer (the active transfer activity) / single reader (logPrintf on the
 // loop task); a plain volatile bool is sufficient on the 32-bit C3.
 static volatile bool serialWireMuted = false;
+
+// Per-line sink registered by DiskLogger (see setDiskLogCallback in Logging.h). Single
+// slot, written once at boot from setup(); read from every logging task. Plain pointer
+// reads/writes are atomic on the C3, and the one-writer boot-time registration means no
+// torn-read window in practice.
+static void (*diskLogCallback)(const char* line) = nullptr;
+
+void setDiskLogCallback(void (*callback)(const char* line)) { diskLogCallback = callback; }
 
 void setSerialWireMuted(bool muted) { serialWireMuted = muted; }
 bool isSerialWireMuted() { return serialWireMuted; }
@@ -103,6 +114,7 @@ void addToLogRingBuffer(const char* message) {
   strncpy(logMessages[logHead], message, MAX_ENTRY_LEN - 1);
   logMessages[logHead][MAX_ENTRY_LEN - 1] = '\0';
   logHead = (logHead + 1) % MAX_LOG_LINES;
+  ++logSequence;
 }
 
 // Since logging can take a large amount of flash, we want to make the format string as short as possible.
@@ -189,10 +201,37 @@ void logPrintf(const char* level, const char* origin, const char* format, ...) {
   }
   addToLogRingBuffer(buf);
   if (locked) xSemaphoreGive(logMutex());
+  // The sink may flush to SD; keep it outside the log mutex. Ring snapshots
+  // take that mutex independently, after the current append is complete.
+  if (diskLogCallback) {
+    diskLogCallback(buf);
+  }
 }
 
+std::string getLogLinesSince(uint32_t& cursor) {
+  const bool locked = logLockUsable();
+  if (locked) xSemaphoreTake(logMutex(), portMAX_DELAY);
+  std::string output;
+  if (rtcLogMagic == LOG_RTC_MAGIC && logHead < MAX_LOG_LINES) {
+    const uint32_t available = std::min<uint32_t>(logSequence - cursor, MAX_LOG_LINES);
+    output.reserve(available * MAX_ENTRY_LEN);
+    for (uint32_t i = available; i > 0; --i) {
+      const size_t idx = (logHead + MAX_LOG_LINES - i) % MAX_LOG_LINES;
+      output.append(logMessages[idx], strnlen(logMessages[idx], MAX_ENTRY_LEN));
+    }
+  }
+  cursor = logSequence;
+  if (locked) xSemaphoreGive(logMutex());
+  return output;
+}
+
+// The crash-report and disk-log paths can read the RTC ring while other tasks
+// append to it; use the same mutex as the writer on live scheduler paths.
 std::string getLastLogs() {
+  const bool locked = logLockUsable();
+  if (locked) xSemaphoreTake(logMutex(), portMAX_DELAY);
   if (rtcLogMagic != LOG_RTC_MAGIC) {
+    if (locked) xSemaphoreGive(logMutex());
     return {};
   }
   std::string output;
@@ -203,6 +242,7 @@ std::string getLastLogs() {
       output.append(logMessages[idx], len);
     }
   }
+  if (locked) xSemaphoreGive(logMutex());
   return output;
 }
 

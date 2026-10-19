@@ -774,6 +774,12 @@ class CrossPointSettings {
   // server are only as safe as the network path. OTA is deliberately exempt:
   // firmware is executed, so it stays verified whatever this is set to.
   uint8_t skipHttpsValidation = 0;
+  // Capture log lines to storage root (/debug.log.txt, rotated per boot into
+  // numbered generations). Off by default: each flush cycle is an SD write on the
+  // logging path, and the RTC ring already covers the crash-report case. This is
+  // the switch you flip when a reporter without a serial monitor needs to send
+  // logs — see DiskLogger. Persisted under the "diskLogs" settings key.
+  uint8_t diskLogs = 0;
 
   // Configurable actions for short / double / long press on each logical button.
   //

@@ -36,6 +36,7 @@
 #include <vector>
 
 #include "BootDiagnostics.h"
+#include "DiskLogger.h"
 #include "ButtonEventManager.h"
 #include "CjkUiFonts.h"
 #include "CrossPointSettings.h"
@@ -1324,12 +1325,9 @@ void setup() {
 
   HalSystem::checkPanic();
   HalSystem::clearPanic();  // TODO: move this to an activity when we have one to display the panic info
-  // Resolve the setting to a real table index once, here, rather than leaving the "never
-  // chosen" sentinel in the field for the rest of the session. activeIndex() is what performs
-  // the migration off the retired TIMEZONE enum, and it is idempotent on an index that is
-  // already valid -- so doing it on every boot costs nothing and means the picker, the row's
-  // displayed value and the next save all see a plain index instead of 255. Runs whether or not
-  // a settings file existed, which the load path alone would not cover.
+  // Start disk logging after loading its setting and clearing the crash-report ring.
+  DiskLogger::begin();
+  // Resolve the legacy timezone sentinel once before the picker or settings save sees it.
   SETTINGS.clockTimezone = timezones::activeIndex();
   timezones::applyToClock();
   // A CJK language's pack carries its CJK UI faces, so the faces are read straight from flash

@@ -8,6 +8,7 @@
 #include <cstring>
 #include <string>
 
+#include "DiskLogger.h"
 #include "SdCardFontGlobals.h"
 #include "fontIds.h"
 
@@ -195,7 +196,14 @@ void CrossPointSettings::saveStartupToNvs() const {
 bool CrossPointSettings::saveToFile() const {
   Storage.mkdir("/.crosspoint");
   saveStartupToNvs();
-  return JsonSettingsIO::saveSettings(*this, SETTINGS_FILE_JSON);
+  const bool ok = JsonSettingsIO::saveSettings(*this, SETTINGS_FILE_JSON);
+  // Flush the disk-log ring immediately on any settings save, most importantly
+  // the one that just flipped diskLogs on: without this, enabling it live in
+  // Settings or via the web API POST doesn't produce a file on disk until 16
+  // more log lines happen to accumulate (see DiskLogger::logLine). No-op when
+  // diskLogs is off (guarded inside flushNow()).
+  DiskLogger::flushNow();
+  return ok;
 }
 
 bool CrossPointSettings::loadFromFile() {

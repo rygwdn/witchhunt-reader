@@ -201,6 +201,10 @@ void SettingsActivity::onEnter() {
   // faces and scale the rest, which the coverage metrics in bench/font_main.cpp cannot settle.
   addToMoved(systemSettings, std::move(SettingInfo::Action(StrId::STR_FONT_SCALING_TEST, SettingAction::FontScalingTest)
                                            .withSubcategory(StrId::STR_MENU_SYS_SYSTEM)));
+#ifdef ENABLE_LOG_VIEWER
+  addToMoved(systemSettings, std::move(SettingInfo::Action(StrId::STR_VIEW_LOGS, SettingAction::ViewLogs)
+                                           .withSubcategory(StrId::STR_MENU_SYS_SYSTEM)));
+#endif
 
   SettingInfo::prepareSubmenus(displaySettings, submenuData);
   SettingInfo::prepareSubmenus(readerSettings, submenuData);

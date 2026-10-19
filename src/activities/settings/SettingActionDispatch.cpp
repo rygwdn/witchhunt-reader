@@ -18,6 +18,9 @@
 #include "KOReaderSettingsActivity.h"
 #include "KeyboardLayoutsActivity.h"
 #include "LanguageSelectActivity.h"
+#ifdef ENABLE_LOG_VIEWER
+#include "LogViewerActivity.h"
+#endif
 #include "OpdsServerListActivity.h"
 #include "OtaUpdateActivity.h"
 #include "ReadingStatsActivity.h"
@@ -81,6 +84,10 @@ std::unique_ptr<Activity> createActivityForAction(SettingAction action, GfxRende
       return std::make_unique<BootDiagnosticsActivity>(renderer, mappedInput);
     case SettingAction::FontScalingTest:
       return std::make_unique<FontScalingTestActivity>(renderer, mappedInput);
+#ifdef ENABLE_LOG_VIEWER
+    case SettingAction::ViewLogs:
+      return std::make_unique<LogViewerActivity>(renderer, mappedInput);
+#endif
     case SettingAction::SyncTime:
       return std::make_unique<SyncTimeActivity>(renderer, mappedInput);
     case SettingAction::DetectTimezone:

@@ -97,8 +97,16 @@ uint8_t logWireLevel();
 #define LOG_INF(origin, format, ...)
 #endif
 
+// Copy at most the ring's 16 newest lines after cursor, advancing the sequence
+// under the logging mutex. The caller commits the new cursor only after SD write.
+std::string getLogLinesSince(uint32_t& cursor);
 std::string getLastLogs();
 void clearLastLogs();
+// Registers a per-line sink for every formatted log line, invoked after the RTC ring
+// append so the callback sees a complete line. Single slot: the disk logger is the only
+// intended consumer. May be called from any task; the callback itself must not log
+// through LOG_* without its own re-entrancy guard. Pass nullptr to unregister.
+void setDiskLogCallback(void (*callback)(const char* line));
 // Validates the RTC log state (magic word + logHead range). Returns true if
 // corruption was detected (magic mismatch or logHead out of range), meaning
 // logMessages is untrusted garbage. Callers should call clearLastLogs() when

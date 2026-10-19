@@ -88,6 +88,12 @@ enum class SettingAction {
   FrontlightBrightnessPicker,
   FrontlightWarmthPicker,
   SwitchToUsbDrive,
+  // Gated like the activity itself: on envs without ENABLE_LOG_VIEWER (gh_release,
+  // gh_release_rc, slim) the row must not exist, not just fail to open. Must therefore
+  // stay an enum entry that only the gated dispatch case handles.
+#ifdef ENABLE_LOG_VIEWER
+  ViewLogs,
+#endif
   Submenu,
 };
 
