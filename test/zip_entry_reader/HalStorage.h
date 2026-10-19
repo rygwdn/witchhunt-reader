@@ -362,6 +362,24 @@ class HalStorage {
   // The device counts the firmware's own writes, for caches keyed on the card's contents; a host
   // test changes its tree between runs, not under a cache.
   uint32_t contentGeneration() const { return 0; }
+  String readFile(const char* path) {
+    HalFile file;
+    if (!openFileForRead("", path, file)) return String("");
+    std::string contents;
+    char buffer[512];
+    for (;;) {
+      const int count = file.read(buffer, sizeof(buffer));
+      if (count <= 0) break;
+      contents.append(buffer, static_cast<size_t>(count));
+    }
+    return String(std::move(contents));
+  }
+  bool writeFile(const char* path, const String& contents) {
+    HalFile file;
+    if (!openFileForWrite("", path, file)) return false;
+    const size_t length = contents.length();
+    return file.write(contents.c_str(), length) == length;
+  }
   // Mirrors the device HalStorage: stream a whole file into a Print sink in
   // chunks. Epub::applyMetadataSidecar() feeds ContentOpfParser through this,
   // so the host pipeline exercises the same code path the device runs.

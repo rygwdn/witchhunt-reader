@@ -15,8 +15,12 @@
 #include <execinfo.h>
 // Weak fallbacks must have external linkage — inside the anonymous namespace
 // they'd become (undefined) internal symbols instead of binding to glibc.
+// glibc-only: dlsym(RTLD_NEXT) is the real path everywhere else; on macOS the
+// __libc_* names do not exist and a weak decl still breaks the link.
+#if defined(__GLIBC__)
 extern "C" void* __libc_malloc(size_t) __attribute__((weak));
 extern "C" void __libc_free(void*) __attribute__((weak));
+#endif
 #endif
 
 namespace {
@@ -267,7 +271,9 @@ void* rawAlloc(size_t bytes) {
   static malloc_fn_t realMalloc = nullptr;
   if (!realMalloc) {
     realMalloc = reinterpret_cast<malloc_fn_t>(dlsym(RTLD_NEXT, "malloc"));
+#if defined(__GLIBC__)
     if (!realMalloc) realMalloc = __libc_malloc;
+#endif
   }
   return realMalloc ? realMalloc(bytes) : nullptr;
 #endif
@@ -280,7 +286,9 @@ void rawFree(void* p) {
   static free_fn_t realFree = nullptr;
   if (!realFree) {
     realFree = reinterpret_cast<free_fn_t>(dlsym(RTLD_NEXT, "free"));
+#if defined(__GLIBC__)
     if (!realFree) realFree = __libc_free;
+#endif
   }
   if (realFree) realFree(p);
 #endif

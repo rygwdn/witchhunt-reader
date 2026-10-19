@@ -71,7 +71,8 @@ class DictionaryWordSelectActivity final : public Activity {
     // bold and regular within a single word.
     EpdFontFamily::Style style;
   };
-  static_assert(sizeof(Fragment) <= 16, "Fragment is on the reader's contiguous-heap budget");
+  static_assert(sizeof(Fragment) <= (sizeof(void*) == 4 ? 16 : 24),
+                "Fragment is on the reader's contiguous-heap budget");
 
   // One word as the reader sees it: a run of consecutive fragments. Selection, highlighting
   // and lookup all work on these, so a bionic-split or hyphenated word behaves like any other.

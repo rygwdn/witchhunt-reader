@@ -423,7 +423,8 @@ TEST(ContentOpfParser, AnInOrderSpineReadsTheItemStoreAboutOnceOnASmallHeap) {
 
   const ScopedIndexGrowthOom oom;
   BookMetadataCache cache(cacheDir);
-  ContentOpfParser parser(cacheDir, "/book/OEBPS/", xml.size(), &cache);
+  const std::string base = "/book/OEBPS/";
+  ContentOpfParser parser(cacheDir, base, xml.size(), &cache);
   const size_t bytesReadBefore = FsFile::bytesRead;
   ASSERT_TRUE(parseOpfXml(parser, xml));
   const size_t bytesRead = FsFile::bytesRead - bytesReadBefore;
@@ -731,7 +732,8 @@ TEST(ContentOpfParserCreators, TheCreatorTableIsFreedWhenMetadataCloses) {
   const std::string rest =
       "<manifest><item id='ncx' href='toc.ncx' media-type='application/x-dtbncx+xml'/></manifest>"
       "<spine/></package>";
-  ContentOpfParser parser(cacheDir, "/book/OEBPS/", head.size() + rest.size(), nullptr);
+  const std::string base = "/book/OEBPS/";
+  ContentOpfParser parser(cacheDir, base, head.size() + rest.size(), nullptr);
   ASSERT_TRUE(parser.setup());
   const size_t before = opf_test_hooks::liveNothrowArrays().size();
   ASSERT_EQ(parser.write(reinterpret_cast<const uint8_t*>(head.data()), head.size()), head.size());

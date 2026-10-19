@@ -149,8 +149,9 @@ class GfxRenderer {
     uint8_t w;
     uint8_t h;
   };
-  // Keeps the documented budget honest if a field is ever added.
-  static_assert(sizeof(ScaledGlyphEntry) <= 16, "scaled-glyph entry grew; update the cache budget comment");
+  // Keep the embedded budget honest; native simulator pointers require extra alignment.
+  static_assert(sizeof(ScaledGlyphEntry) <= (sizeof(void*) == 4 ? 16 : 24),
+                "scaled-glyph entry grew; update the cache budget comment");
   // Sized from measurement, not guesswork: a page of this corpus needs 45-58
   // distinct renditions (three font groups x ~40 glyphs, per the prewarm logs)
   // averaging ~40 bytes of mask each. 48 entries reset on every pass — the table,
