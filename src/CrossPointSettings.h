@@ -474,6 +474,11 @@ class CrossPointSettings {
   // sizing renders native — both inline wrappers like <span style="font-size:0.92em"> around whole
   // paragraphs and a size stated on the block itself (p.body { font-size: 1.1em }). Default on.
   uint8_t fontSizeNormalization = 1;
+  // Floors every resolved font size (block and per-word CSS sizing, sup/sub, footnotes,
+  // captions...) at the user's selected reading size, so no text ever renders smaller than
+  // what was chosen in the font-size setting. An accessibility trade: publisher size
+  // hierarchy below body is flattened to body size. Default off (publisher intent honored).
+  uint8_t enforceMinimumFontSize = 0;
 
   // Reader screen margin settings
   uint8_t screenMargin = 5;

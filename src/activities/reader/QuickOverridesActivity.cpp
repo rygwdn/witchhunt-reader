@@ -21,7 +21,7 @@ QuickOverridesActivity::QuickOverridesActivity(
     const int8_t initialBionicReadingOverride, const int8_t initialGuideDotsOverride,
     const int8_t initialParagraphAlignmentOverride, const int8_t initialTextAntiAliasingOverride,
     const int8_t initialHyphenationOverride, const int8_t initialFontSizeNormalizationOverride,
-    const int8_t initialInlineFootnotePreviewsOverride)
+    const int8_t initialInlineFootnotePreviewsOverride, const int8_t initialEnforceMinimumFontSizeOverride)
     : MenuListActivity("QuickOverrides", renderer, mappedInput),
       pendingEmbeddedStyleOverride(initialEmbeddedStyleOverride),
       pendingImageRenderingOverride(initialImageRenderingOverride),
@@ -34,12 +34,12 @@ QuickOverridesActivity::QuickOverridesActivity(
       pendingTextAntiAliasingOverride(initialTextAntiAliasingOverride),
       pendingHyphenationOverride(initialHyphenationOverride),
       pendingFontSizeNormalizationOverride(initialFontSizeNormalizationOverride),
-      pendingInlineFootnotePreviewsOverride(initialInlineFootnotePreviewsOverride) {
+      pendingInlineFootnotePreviewsOverride(initialInlineFootnotePreviewsOverride),
+      pendingEnforceMinimumFontSizeOverride(initialEnforceMinimumFontSizeOverride) {
   buildMenuItems();
 }
 
 namespace {
-
 // Three-state cycle helper for overrides represented as int8_t with -1 = default.
 //   slot 0 -> -1 (default)
 //   slot 1 -> 1  (on)
@@ -218,6 +218,18 @@ void QuickOverridesActivity::buildMenuItems() {
         static_cast<QuickOverridesActivity*>(ctx)->pendingInlineFootnotePreviewsOverride =
             threeStateOverrideFromSlot(v);
       }));
+
+  // Enforce minimum text size: default / on / off
+  menuItems.push_back(SettingInfo::DynamicEnumCtx(
+      StrId::STR_ENFORCE_MIN_FONT_SIZE, {StrId::STR_DEFAULT_VALUE, StrId::STR_STATE_ON, StrId::STR_STATE_OFF}, self,
+      [](const void* ctx) -> uint8_t {
+        return threeStateSlotFromOverride(
+            static_cast<const QuickOverridesActivity*>(ctx)->pendingEnforceMinimumFontSizeOverride);
+      },
+      [](void* ctx, uint8_t v) {
+        static_cast<QuickOverridesActivity*>(ctx)->pendingEnforceMinimumFontSizeOverride =
+            threeStateOverrideFromSlot(v);
+      }));
 }
 
 void QuickOverridesActivity::onEnter() {
@@ -254,6 +266,7 @@ void QuickOverridesActivity::finishWithResult(bool cancelled) {
   payload.hyphenationOverride = pendingHyphenationOverride;
   payload.fontSizeNormalizationOverride = pendingFontSizeNormalizationOverride;
   payload.inlineFootnotePreviewsOverride = pendingInlineFootnotePreviewsOverride;
+  payload.enforceMinimumFontSizeOverride = pendingEnforceMinimumFontSizeOverride;
   result.data = std::move(payload);
   setResult(std::move(result));
   finish();

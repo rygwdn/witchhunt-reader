@@ -68,7 +68,8 @@ EpubReaderMenuActivity::EpubReaderMenuActivity(
     const int8_t initialGuideDotsOverride, const int8_t initialParagraphAlignmentOverride,
     const int8_t initialTextAntiAliasingOverride, const int8_t initialHyphenationOverride,
     const int8_t initialFontSizeNormalizationOverride, const int8_t initialInlineFootnotePreviewsOverride,
-    const bool hasStarredPages, const bool isCurrentPageStarred, const bool hasPrintedPages)
+    const int8_t initialEnforceMinimumFontSizeOverride, const bool hasStarredPages, const bool isCurrentPageStarred,
+    const bool hasPrintedPages)
     : TabbedUiListActivity("EpubReaderMenu", renderer, mappedInput),
       currentPageStarred(isCurrentPageStarred),
       pendingOrientation(currentOrientation),
@@ -85,6 +86,7 @@ EpubReaderMenuActivity::EpubReaderMenuActivity(
       pendingHyphenationOverride(initialHyphenationOverride),
       pendingFontSizeNormalizationOverride(initialFontSizeNormalizationOverride),
       pendingInlineFootnotePreviewsOverride(initialInlineFootnotePreviewsOverride),
+      pendingEnforceMinimumFontSizeOverride(initialEnforceMinimumFontSizeOverride),
       title(title),
       currentPage(currentPage),
       totalPages(totalPages),
@@ -349,6 +351,18 @@ void EpubReaderMenuActivity::buildMenuItems(bool hasFootnotes, bool hasStarredPa
             threeStateOverrideFromSlot(v);
       }));
 
+  // Enforce minimum text size: default / on / off (mirrors QuickOverrides)
+  settingsItems.push_back(SettingInfo::DynamicEnumCtx(
+      StrId::STR_ENFORCE_MIN_FONT_SIZE, {StrId::STR_DEFAULT_VALUE, StrId::STR_STATE_ON, StrId::STR_STATE_OFF}, self,
+      [](const void* ctx) -> uint8_t {
+        return threeStateSlotFromOverride(
+            static_cast<const EpubReaderMenuActivity*>(ctx)->pendingEnforceMinimumFontSizeOverride);
+      },
+      [](void* ctx, uint8_t v) {
+        static_cast<EpubReaderMenuActivity*>(ctx)->pendingEnforceMinimumFontSizeOverride =
+            threeStateOverrideFromSlot(v);
+      }));
+
   if (KOREADER_STORE.hasCredentials()) {
     syncItems.push_back(SettingInfo::Action(StrId::STR_PULL_PROGRESS_FROM_OTHER_DEVICES, SettingAction::None));
     syncItems.push_back(SettingInfo::Action(StrId::STR_PUSH_PROGRESS_FROM_THIS_DEVICE, SettingAction::None));
@@ -441,6 +455,7 @@ void EpubReaderMenuActivity::finishWithAction(MenuAction action) {
   payload.fontSizeNormalizationOverride = pendingFontSizeNormalizationOverride;
   payload.guideDotsOverride = pendingGuideDotsOverride;
   payload.inlineFootnotePreviewsOverride = pendingInlineFootnotePreviewsOverride;
+  payload.enforceMinimumFontSizeOverride = pendingEnforceMinimumFontSizeOverride;
   setResult(std::move(payload));
   finish();
 }
@@ -549,6 +564,10 @@ std::string EpubReaderMenuActivity::getItemValueString(int index) const {
     }
     if (item.nameId == StrId::STR_FONT_SIZE_NORMALIZATION && pendingFontSizeNormalizationOverride < 0) {
       const auto defaultEffective = (SETTINGS.fontSizeNormalization != 0) ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
+      return std::string(tr(STR_DEFAULT_VALUE)) + " (" + defaultEffective + ")";
+    }
+    if (item.nameId == StrId::STR_ENFORCE_MIN_FONT_SIZE && pendingEnforceMinimumFontSizeOverride < 0) {
+      const auto defaultEffective = (SETTINGS.enforceMinimumFontSize != 0) ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
       return std::string(tr(STR_DEFAULT_VALUE)) + " (" + defaultEffective + ")";
     }
   }

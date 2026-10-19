@@ -195,6 +195,7 @@ class Section {
     uint16_t viewportHeight = 0;
     bool hyphenationEnabled = false;
     bool fontSizeNormalization = true;
+    bool enforceMinimumFontSize = false;
     bool embeddedStyle = false;
     bool bionicReadingEnabled = false;
     bool inlineFootnotePreviews = false;

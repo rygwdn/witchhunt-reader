@@ -717,6 +717,7 @@ bool JsonSettingsIO::saveRecentBooks(const RecentBooksStore& store, const char* 
     obj["textAntiAliasingOverride"] = book.textAntiAliasingOverride;
     obj["hyphenationOverride"] = book.hyphenationOverride;
     obj["fontSizeNormalizationOverride"] = book.fontSizeNormalizationOverride;
+    obj["enforceMinimumFontSizeOverride"] = book.enforceMinimumFontSizeOverride;
     obj["guideDotsOverride"] = book.guideDotsOverride;
     obj["inlineFootnotePreviewsOverride"] = book.inlineFootnotePreviewsOverride;
   }
@@ -795,6 +796,7 @@ RecentBooksLoad JsonSettingsIO::loadRecentBooks(RecentBooksStore& store, const c
     book.textAntiAliasingOverride = clampInt8(obj["textAntiAliasingOverride"] | -1, -1, 1, -1);
     book.hyphenationOverride = clampInt8(obj["hyphenationOverride"] | -1, -1, 1, -1);
     book.fontSizeNormalizationOverride = clampInt8(obj["fontSizeNormalizationOverride"] | -1, -1, 1, -1);
+    book.enforceMinimumFontSizeOverride = clampInt8(obj["enforceMinimumFontSizeOverride"] | -1, -1, 1, -1);
     book.guideDotsOverride = clampInt8(obj["guideDotsOverride"] | -1, -1, 1, -1);
     book.inlineFootnotePreviewsOverride = clampInt8(obj["inlineFootnotePreviewsOverride"] | -1, -1, 1, -1);
     store.recentBooks.push_back(std::move(book));

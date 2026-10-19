@@ -723,6 +723,7 @@ class EpubReaderActivity final : public Activity {
   int8_t bookFontSizeNormalizationOverride = -1;
   int8_t bookGuideDotsOverride = -1;
   int8_t bookInlineFootnotePreviewsOverride = -1;
+  int8_t bookEnforceMinimumFontSizeOverride = -1;
 
   // Bookmarks (starred pages)
   BookmarkStore bookmarkStore;
@@ -1140,7 +1141,7 @@ class EpubReaderActivity final : public Activity {
                                 int8_t bionicReadingOverride, int8_t paragraphAlignmentOverride,
                                 int8_t textAntiAliasingOverride, int8_t hyphenationOverride,
                                 int8_t fontSizeNormalizationOverride, int8_t guideDotsOverride,
-                                int8_t inlineFootnotePreviewsOverride);
+                                int8_t inlineFootnotePreviewsOverride, int8_t enforceMinimumFontSizeOverride);
   void openReaderMenu();
   void openQuickOverrides();
   bool getEffectiveEmbeddedStyle() const;
@@ -1150,6 +1151,7 @@ class EpubReaderActivity final : public Activity {
   bool getEffectiveTextAntiAliasing() const;
   bool getEffectiveHyphenation() const;
   bool getEffectiveFontSizeNormalization() const;
+  bool getEffectiveEnforceMinimumFontSize() const;
   bool getEffectiveGuideDots() const;
   bool getEffectiveInlineFootnotePreviews() const;
   int getEffectiveReaderFontId() const;

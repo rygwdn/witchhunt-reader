@@ -657,6 +657,16 @@ void ChapterHtmlSlimParser::updateEffectiveInlineStyle() {
   if (sizePct >= 100 - deadZone && sizePct <= 100 + deadZone) {
     sizePct = 100;
   }
+  // Minimum-text-size floor: never render "main text" smaller than the user's selected
+  // reading size (footnote/caption spans, deliberate publisher shrink — clamped to body).
+  // Superscript/subscript are deliberately exempt: they are expected to render smaller than
+  // the surrounding text (footnote markers, ordinals, chemical formulas) and flooring them
+  // to body size would make them indistinguishable from normal text. Applied after the
+  // dead-zone snap and before the final channel clamp, so it wins over any composed
+  // sub-100% size regardless of source, except sup/sub.
+  if (enforceMinimumFontSize && sizePct < 100 && !effectiveSup && !effectiveSub) {
+    sizePct = 100;
+  }
   effectiveSizePct = static_cast<uint8_t>(
       std::min<int>(std::max<int>(sizePct, ParsedText::MIN_WORD_SIZE_PCT), ParsedText::MAX_WORD_SIZE_PCT));
 }
@@ -4394,7 +4404,7 @@ void ChapterHtmlSlimParser::resolveBlockFont(BlockStyle& bs) {
   if (bs.headingFontId != 0) return;
   const uint8_t slot =
       blockFamilyState_ == 0 ? 0 : fontFamilies_.slotOf(blockFamilyState_ == 1 ? blockFirstFamily_ : blockOwnFamily_);
-  const float size = bs.fontSizeMultiplier;
+  const float size = enforceMinimumFontSize && bs.fontSizeMultiplier < 1.0f ? 1.0f : bs.fontSizeMultiplier;
   const FontSizeLadder::Resolved r = resolveFamilyFont(fontFamilies_.family(slot), size);
   bs.headingFontId = r.fontId;
   bs.fontSizeMultiplier = r.residual;

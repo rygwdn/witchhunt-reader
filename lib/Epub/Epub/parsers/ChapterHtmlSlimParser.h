@@ -282,6 +282,10 @@ class ChapterHtmlSlimParser final : public Print {
   // When true, widen the per-word font-size dead zone (±10% snaps publisher <span font-size:0.92em>
   // body wrappers back to native size); when false, only a tight ±3% dead zone is applied.
   bool fontSizeNormalization;
+  // Floors every resolved font size (block via resolveBlockFont, per-word via
+  // updateEffectiveInlineStyle) at the body/100% size, so nothing renders smaller than the
+  // user's selected reading size. See CrossPointSettings::enforceMinimumFontSize.
+  bool enforceMinimumFontSize;
   const CssParser* cssParser;
   EpubImageManifest* imageManifest;
   bool embeddedStyle;
@@ -850,7 +854,8 @@ class ChapterHtmlSlimParser final : public Print {
                                  const float lineCompression, const bool extraParagraphSpacing,
                                  const uint8_t paragraphAlignment, const uint16_t viewportWidth,
                                  const uint16_t viewportHeight, const bool hyphenationEnabled,
-                                 const bool fontSizeNormalization, const bool bionicReadingEnabled,
+                                 const bool fontSizeNormalization, const bool enforceMinimumFontSize,
+                                 const bool bionicReadingEnabled,
                                  const std::function<bool(std::unique_ptr<Page>)>& completePageFn,
                                  const bool embeddedStyle, const std::string& contentBase,
                                  const std::string& imageBasePath, const uint8_t imageRendering = 0,
@@ -870,6 +875,7 @@ class ChapterHtmlSlimParser final : public Print {
         viewportHeight(viewportHeight),
         hyphenationEnabled(hyphenationEnabled),
         fontSizeNormalization(fontSizeNormalization),
+        enforceMinimumFontSize(enforceMinimumFontSize),
         cssParser(cssParser),
         imageManifest(imageManifest),
         embeddedStyle(embeddedStyle),

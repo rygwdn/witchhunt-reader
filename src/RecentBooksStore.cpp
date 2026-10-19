@@ -295,7 +295,7 @@ bool RecentBooksStore::setReaderOverrides(const std::string& path, const int8_t 
                             sdFontFamilyOverride, fontSizeOverride, static_cast<int8_t>(bionicReadingOverride ? 1 : 0),
                             paragraphAlignmentOverride, it->textAntiAliasingOverride, it->hyphenationOverride,
                             it->fontSizeNormalizationOverride, it->guideDotsOverride,
-                            it->inlineFootnotePreviewsOverride);
+                            it->inlineFootnotePreviewsOverride, it->enforceMinimumFontSizeOverride);
 }
 
 bool RecentBooksStore::setReaderOverrides(const std::string& path, const int8_t embeddedStyleOverride,
@@ -304,7 +304,8 @@ bool RecentBooksStore::setReaderOverrides(const std::string& path, const int8_t 
                                           const int8_t bionicReadingOverride, const int8_t paragraphAlignmentOverride,
                                           const int8_t textAntiAliasingOverride, const int8_t hyphenationOverride,
                                           const int8_t fontSizeNormalizationOverride, const int8_t guideDotsOverride,
-                                          const int8_t inlineFootnotePreviewsOverride) {
+                                          const int8_t inlineFootnotePreviewsOverride,
+                                          const int8_t enforceMinimumFontSizeOverride) {
   const Hold hold;
   auto it =
       std::find_if(recentBooks.begin(), recentBooks.end(), [&](const RecentBook& book) { return book.path == path; });
@@ -324,6 +325,7 @@ bool RecentBooksStore::setReaderOverrides(const std::string& path, const int8_t 
   it->fontSizeNormalizationOverride = fontSizeNormalizationOverride;
   it->guideDotsOverride = guideDotsOverride;
   it->inlineFootnotePreviewsOverride = inlineFootnotePreviewsOverride;
+  it->enforceMinimumFontSizeOverride = enforceMinimumFontSizeOverride;
   return saveToFile();
 }
 

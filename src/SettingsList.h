@@ -370,6 +370,9 @@ inline void buildSettings(const RowSink& emit) {
                            StrId::STR_CAT_READER));
   emit(SettingInfo::Toggle(StrId::STR_FONT_SIZE_NORMALIZATION, &CrossPointSettings::fontSizeNormalization,
                            "fontSizeNormalization", StrId::STR_CAT_READER));
+  emit(SettingInfo::Toggle(StrId::STR_ENFORCE_MIN_FONT_SIZE,
+                           &CrossPointSettings::enforceMinimumFontSize, "enforceMinimumFontSize",
+                           StrId::STR_CAT_READER));
   // Which StarDict dictionary word lookup uses. An Action rather than an Enum:
   // the options are folders discovered on the SD card at open time, not a fixed
   // list, so the picker has to scan.

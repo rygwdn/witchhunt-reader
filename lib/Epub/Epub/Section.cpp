@@ -364,6 +364,7 @@ uint32_t Section::calculatePropertyHash(const BuildParams& p) {
   append(&p.viewportHeight, sizeof(p.viewportHeight));
   append(&p.hyphenationEnabled, sizeof(p.hyphenationEnabled));
   append(&p.fontSizeNormalization, sizeof(p.fontSizeNormalization));
+  append(&p.enforceMinimumFontSize, sizeof(p.enforceMinimumFontSize));
   append(&p.embeddedStyle, sizeof(p.embeddedStyle));
   append(&p.bionicReadingEnabled, sizeof(p.bionicReadingEnabled));
   append(&p.inlineFootnotePreviews, sizeof(p.inlineFootnotePreviews));
@@ -1193,7 +1194,7 @@ Section::BuildPhaseResult Section::runBuildSetup(BuildState& st) {
   // so this reference is valid for the visitor's whole lifetime, including across slices.
   st.visitor = std::make_unique<ChapterHtmlSlimParser>(
       epub, renderer, p.fontId, p.lineCompression, p.extraParagraphSpacing, p.paragraphAlignment, p.viewportWidth,
-      p.viewportHeight, p.hyphenationEnabled, p.fontSizeNormalization, p.bionicReadingEnabled,
+      p.viewportHeight, p.hyphenationEnabled, p.fontSizeNormalization, p.enforceMinimumFontSize, p.bionicReadingEnabled,
       [this, &st](std::unique_ptr<Page> page) {
         // The page's LUT entry first: a page written without one could never be loaded, and
         // pageCount would run ahead of the table. Refused (no chunk for it), the page is not

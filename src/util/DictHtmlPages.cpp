@@ -86,7 +86,7 @@ bool buildDictionaryHtmlPages(GfxRenderer& renderer, const std::string& definiti
     auto parser = makeUniqueNoThrow<ChapterHtmlSlimParser>(
         nullptr, renderer, fontId, SETTINGS.getReaderLineCompression(), SETTINGS.extraParagraphSpacing != 0,
         SETTINGS.paragraphAlignment, viewportWidth, viewportHeight, SETTINGS.hyphenationEnabled != 0,
-        SETTINGS.fontSizeNormalization != 0, SETTINGS.bionicReading != 0,
+        SETTINGS.fontSizeNormalization != 0, SETTINGS.enforceMinimumFontSize != 0, SETTINGS.bionicReading != 0,
         // Always true: past a limit the pages are dropped here, and the parse is left to finish.
         [&pagesOut, &resourceLimitHit, &retainedElements, &limitReason](std::unique_ptr<Page> page) {
           if (resourceLimitHit) return true;
