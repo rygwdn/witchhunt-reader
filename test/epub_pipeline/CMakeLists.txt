@@ -111,6 +111,7 @@ add_executable(EpubPipelineTest
   LongChapterPageTablesTest.cpp
   TableRowFallbackArenaTest.cpp
   AnchorMapTest.cpp
+  PageSignificantImagesTest.cpp
   MinimumFontSizeTest.cpp
   AnchorPageAccuracyTest.cpp
   TocBoundariesAfterBuildTest.cpp

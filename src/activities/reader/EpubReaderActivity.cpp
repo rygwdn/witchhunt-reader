@@ -5668,6 +5668,7 @@ void EpubReaderActivity::renderContents(RenderLock& lock, std::unique_ptr<Page> 
   fcm->resetStats();
 
   const int viewportHeight = std::max(0, renderer.getScreenHeight() - orientedMarginTop - orientedMarginBottom);
+  const int viewportWidth = std::max(0, renderer.getScreenWidth() - orientedMarginLeft - orientedMarginRight);
   const int contentTop = orientedMarginTop + getImageOnlyPageYOffset(*page, viewportHeight);
 
   // Building through a chapter's last pages, Background-B kept the secondary buffer for its build of the next one
@@ -6094,8 +6095,11 @@ void EpubReaderActivity::renderContents(RenderLock& lock, std::unique_ptr<Page> 
   const auto tDisplay = millis();
 
   // Schedule a half-refresh on the next page turn after an image page to reduce ghosting.
-  // Must be checked BEFORE page is moved into pendingGrayscale_ below.
+  // Must be checked BEFORE page is moved into pendingGrayscale_ below. Gated on
+  // hasSignificantImages(), not just hasImages(): a small inline icon/dingbat/drop-cap poses
+  // little ghosting risk and does not need the same flash as a full illustration.
   if (page->hasImages() && !page->allImagesArePlaceholders(effectiveForceLoad, imageMonochrome) &&
+      page->hasSignificantImages(viewportWidth, viewportHeight) &&
       getEffectiveImageRendering() != CrossPointSettings::IMAGES_SUPPRESS) {
     pendingHalfRefreshAfterImagePage = true;
   }
@@ -6441,6 +6445,7 @@ void EpubReaderActivity::displayPreRenderedPage(const Page& page, const int orie
                                                 const int orientedMarginRight, const int orientedMarginBottom,
                                                 const int orientedMarginLeft) {
   const int viewportHeight = std::max(0, renderer.getScreenHeight() - orientedMarginTop - orientedMarginBottom);
+  const int viewportWidth = std::max(0, renderer.getScreenWidth() - orientedMarginLeft - orientedMarginRight);
   const int contentTop = orientedMarginTop + getImageOnlyPageYOffset(page, viewportHeight);
 
 #if DEBUG_BACKGROUND_WORK
@@ -6494,12 +6499,10 @@ void EpubReaderActivity::displayPreRenderedPage(const Page& page, const int orie
   lastPageRefreshMode_ = renderer.getLastRefreshMode();
   lastPageDisplayModeByte_ = renderer.getLastDisplayModeByte();
 
-  // The image-page bookkeeping renderContents() does, in the form it takes for a pre-rendered
-  // page: the pre-render shows a page only when every image on it replayed from its cache, so
-  // none is a placeholder, and the half refresh that clears an image's grey particles is armed
-  // for the page after it whenever it has images at all.
+  // Cached images cannot be placeholders; use the same coverage gate as renderContents().
   pageHasPlaceholders = false;
-  if (page.hasImages() && getEffectiveImageRendering() != CrossPointSettings::IMAGES_SUPPRESS) {
+  if (page.hasImages() && page.hasSignificantImages(viewportWidth, viewportHeight) &&
+      getEffectiveImageRendering() != CrossPointSettings::IMAGES_SUPPRESS) {
     pendingHalfRefreshAfterImagePage = true;
   }
 

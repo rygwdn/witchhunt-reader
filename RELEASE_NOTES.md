@@ -34,6 +34,7 @@ Everything since 2.37. Your books have one Library screen, with tabs for Recent,
 ### Reading
 
 - **Consecutive chapter headings stay with the opening paragraph when they fit together.** Longer heading runs split without losing text or anchor destinations, and a page-ending heading line does not leave a word split across pages.
+- **Small inline pictures do not trigger a flashing refresh on the next page.** The same image-coverage threshold applies whether a page is rendered on demand or prepared ahead of time.
 - **Background pictures set by a book's stylesheet are shown.** They were never drawn: Gutenberg's illustrated *Alice* draws its rabbit hole as the background of a table, so chapter 2 showed only the text around it. Text cannot be drawn over a picture here, so the picture now follows the text of the box it belongs to. Small ornaments (under 96 pixels a side), repeating textures, list bullets and whole-page backgrounds are still left out.
 - **A long paragraph keeps the space the book puts above it.** A paragraph of more than 96 words lost its top margin and padding, and with them the blank line of a scene break before it, or the space of an empty box.
 - **A poem's indented lines keep their shape on a narrow screen.** In *Alice*'s "Mouse's Tale", each line of the tail is indented a step further, and on the X3 the deepest lines wrapped back to the left edge and broke the tail apart. The indent now gives way first, so a line whose words fit the column stays on one line.

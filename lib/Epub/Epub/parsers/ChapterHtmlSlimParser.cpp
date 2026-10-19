@@ -308,6 +308,11 @@ const char* INLINE_FORMATTING_TAGS[] = {"span", "a",      "b",    "strong", "i",
                                         "rp",   "rtc",    "font", "q",      "cite",  "abbr", "acronym", "code", "mark",
                                         "dfn",  "kbd",    "samp", "var",    "tt",    "bdi",  "bdo",     "time", "data"};
 constexpr int NUM_INLINE_FORMATTING_TAGS = sizeof(INLINE_FORMATTING_TAGS) / sizeof(INLINE_FORMATTING_TAGS[0]);
+// Floor (fraction of the container width) below which an explicitly-widthed
+// <img> is enlarged on e-ink — see the legibility-floor comment at the width
+// resolution site. 35% of a 460px column is ~161px, the smallest render at
+// which detailed pencil/line illustrations stay recognizable after dithering.
+constexpr float kMinImageViewportFraction = 0.35f;
 
 const char* SKIP_TAGS[] = {"head"};
 constexpr int NUM_SKIP_TAGS = sizeof(SKIP_TAGS) / sizeof(SKIP_TAGS[0]);
@@ -2624,6 +2629,15 @@ void ChapterHtmlSlimParser::startElement(void* userData, const char* name, const
                   displayWidth =
                       static_cast<int>(imgStyle.imageWidth.toPixels(emSize, static_cast<float>(containerWidth)) + 0.5f);
                   if (displayWidth > containerWidth) displayWidth = containerWidth;
+                  // A percentage width often reflects a tablet layout that is too small for
+                  // detailed art on e-ink. Preserve explicit px/em publisher sizing; only a
+                  // percentage image width receives the legibility floor.
+                  if (imgStyle.imageWidth.unit == CssUnit::Percent) {
+                    const int legibilityFloorPx =
+                        std::min(static_cast<int>(containerWidth * kMinImageViewportFraction + 0.5f),
+                                 static_cast<int>(dims.width));
+                    if (legibilityFloorPx > displayWidth) displayWidth = legibilityFloorPx;
+                  }
                   if (displayWidth < 1) displayWidth = 1;
                   displayHeight =
                       static_cast<int>(displayWidth * (static_cast<float>(dims.height) / dims.width) + 0.5f);

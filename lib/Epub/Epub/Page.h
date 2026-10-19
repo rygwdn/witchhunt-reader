@@ -211,7 +211,9 @@ class Page {
   // TextBlock::deserialize); the page must then die before the caller's arena block does.
   static std::unique_ptr<Page> deserialize(FsFile& file, BuildArena* scratch = nullptr);
 
-  // Check if page contains any images (used to force full refresh)
+  // Check if page contains any images, of any size (structural predicate; used to exclude
+  // image pages from pre-rendering and, together with hasSignificantImages(), to schedule a
+  // ghost-prevention half-refresh on the next page turn — never to force a full refresh).
   bool hasImages() const {
     return std::any_of(elements.begin(), elements.end(), [](const std::unique_ptr<PageElement>& el) {
       if (el->getTag() == TAG_PageImage) return true;
@@ -263,5 +265,28 @@ class Page {
       outH = maxY - minY;
     }
     return found;
+  }
+
+  // True when the page's images cover enough of the viewport that a ghost-prevention
+  // half-refresh on the following page-turn is worth its flash — as opposed to a small inline
+  // icon/dingbat/drop-cap image, which does not need the same treatment as a full illustration.
+  // Table-cell images aren't summed by area here (their per-image dimensions don't thread
+  // through PageTableFragment), so any table image counts as significant, matching the
+  // conservatism hasImages() already applies to tables.
+  bool hasSignificantImages(const int16_t viewportWidth, const int16_t viewportHeight) const {
+    static constexpr int kSignificantImageCoveragePct = 8;
+    if (viewportWidth <= 0 || viewportHeight <= 0) return hasImages();
+    const int32_t viewportArea = static_cast<int32_t>(viewportWidth) * viewportHeight;
+    int32_t imageArea = 0;
+    for (const auto& el : elements) {
+      if (el->getTag() == TAG_PageTable && static_cast<const PageTableFragment&>(*el).hasImages()) {
+        return true;
+      }
+      if (el->getTag() != TAG_PageImage) continue;
+      const auto& img = static_cast<const PageImage&>(*el);
+      imageArea +=
+          static_cast<int32_t>(img.getImageBlock().getWidth()) * img.getImageBlock().getRenderedHeight();
+    }
+    return imageArea * 100 >= viewportArea * kSignificantImageCoveragePct;
   }
 };
