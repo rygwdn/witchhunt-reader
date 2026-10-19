@@ -722,8 +722,12 @@ TEST(SdFatAlloc, RandomRoundsKeepTheFatConsistentOnFat16) {
 TEST(SdFatAlloc, RandomRoundsKeepTheFatConsistentOnFat32) {
   Card card(2 * GB + 64 * MB);  // 32 KB clusters
   ASSERT_EQ(card.fatType, 32);
-  // Most of the card in one block of books low on it, so the rounds run near full.
-  ASSERT_TRUE(card.fill("/ballast.epub", static_cast<uint64_t>(card.lastCluster - 6000) * card.bytesPerCluster));
+  // Most of the card in one block of books low on it, so the rounds run at full. The free space
+  // left is what the rounds themselves fill: with 6,000 clusters (187 MB) left the rounds' net
+  // growth (~5,500 clusters) fell short, the card was never full, and the "the wrap was
+  // exercised" guard below came to depend on the seed (3 full events for one seed, 15 for
+  // another). 1,200 clusters (37 MB) puts the rounds at full from the start, where they stay.
+  ASSERT_TRUE(card.fill("/ballast.epub", static_cast<uint64_t>(card.lastCluster - 1200) * card.bytesPerCluster));
   runRandomRounds(card, 400, 3886, 1200);
 }
 
