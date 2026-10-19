@@ -3388,12 +3388,9 @@ static FontSizeLadder builtinFontSizeLadder(const uint8_t family, const uint8_t 
   return ladder;
 }
 
-// Sibling-size ladder for a built-in body font: every size of the same family, with its
-// point size expressed as a percent of the body's. Deterministic from the fontId ALONE —
-// the section-cache property hash deliberately excludes the ladder on that basis, so any
-// path that rebuilds a section (foreground, background, sleep) derives an identical ladder
-// from the same fontId. Unknown ids (SD-card fonts, one loaded size) get an empty ladder,
-// which keeps the pure-scale fallback.
+// Sibling-size ladder for a built-in body font. Unknown IDs keep an empty ladder
+// and the selected face's scale-only fallback. Rung IDs and ratios are included
+// in the section-cache property hash.
 //
 // Glyph-cache note: an earlier taller-heading-font attempt thrashed the FontDecompressor's
 // four page slots. Two things changed since: FontCacheManager now prewarms per fontId, and
@@ -3423,7 +3420,7 @@ static FontSizeLadder buildReaderFontSizeLadder(const int bodyFontId) {
       return builtinFontSizeLadder(family, rungs[i].points);
     }
   }
-  return ladder;  // SD font or unknown id: empty ladder = scale-only fallback
+  return ladder;
 }
 
 // Publisher Fonts' Accents and All Text: the book's other families, for the blocks set in them. A generic serif or

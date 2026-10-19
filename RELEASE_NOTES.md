@@ -23,6 +23,7 @@ Everything since 2.37. Your books have one Library screen, with tabs for Recent,
 
 ### Fonts
 
+- **Heading sizes survive layered publisher stylesheets.** A later rule that changes only emphasis no longer picks up an unrelated earlier rule's size when styles are read from the on-card index.
 - **An SD-card font offers the sizes it was made in** (#395), such as 6, 7 or 8 pt, not only 10 to 26 pt. Above its largest size it also offers the standard sizes, drawn from its largest file enlarged; it never offers a size made by shrinking a larger file. Bookerly and Noto Sans keep 10 to 26 pt. If you switch to a font that does not offer your size, the nearest size it does offer is shown and used, and your own size comes back when you switch back. The same applies to the font size of a single book and to the TXT and Markdown font.
 - **The web interface's settings page can change the font and its size in one save.** A size picked from the list is saved as picked, and the list follows a change of font.
 - **The font picker makes its previews without running the X3 short of memory.** It now works in the screen's second frame buffer instead of the shared memory: the lowest free memory while it makes previews went from about 10 KB to 26 KB, and making them no longer stops halfway for lack of memory.

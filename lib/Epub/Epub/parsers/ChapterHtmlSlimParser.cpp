@@ -1661,13 +1661,15 @@ void ChapterHtmlSlimParser::finalizePendingDropCap() {
     for (int i = 0; i < fontSizeLadder_.count; ++i) {
       const auto& rung = fontSizeLadder_.rungs[i];
       if (rung.sizePct <= 100) continue;
-      if (auxFontId_ != 0 && rung.fontId != auxFontId_) continue;
+      // A heading may have "claimed" the body ID as its aux font; that is still the
+      // body's existing three-style set, so the dedicated sibling can use the one true aux slot.
+      if (auxFontId_ != 0 && auxFontId_ != fontId && rung.fontId != auxFontId_) continue;
       if (best < 0 || rung.sizePct > fontSizeLadder_.rungs[best].sizePct) best = i;
     }
     if (best >= 0) {
       capFontId = fontSizeLadder_.rungs[best].fontId;
       capScale = pendingDropCap_.multiplier * 100.0f / fontSizeLadder_.rungs[best].sizePct;
-      if (auxFontId_ == 0) auxFontId_ = capFontId;
+      if (auxFontId_ == 0 || auxFontId_ == fontId) auxFontId_ = capFontId;
     }
   }
   const int capEffFontId = capFontId != 0 ? capFontId : fontId;
@@ -1823,7 +1825,12 @@ void ChapterHtmlSlimParser::addAncestorInsets(BlockStyle& style, const float emS
     left += entry.left;
     right += entry.right;
   }
-  const int cap = static_cast<int>(emSize * BlockStyle::MAX_HORIZONTAL_INSET_EM);
+  // Same double bound as BlockStyle::fromCssStyle: the em cap alone can't stop
+  // stacked ancestor insets from eating the column at large font settings.
+  int cap = static_cast<int>(emSize * BlockStyle::MAX_HORIZONTAL_INSET_EM);
+  if (viewportWidth > 0) {
+    cap = std::min<int>(cap, static_cast<int>(viewportWidth * BlockStyle::MAX_HORIZONTAL_INSET_VIEWPORT + 0.5f));
+  }
   // Only the sum is ever laid out (leftInset()/rightInset()), so the capped total goes on the
   // margin and the padding keeps its own value. Both stay >= 0: fromCssStyle clamps each
   // element's contribution to [0, cap], so the capped total can never fall below the padding.
@@ -2940,6 +2947,29 @@ void ChapterHtmlSlimParser::startElement(void* userData, const char* name, const
     userAlignmentBlockStyle.paddingLeft = static_cast<int16_t>(emSize * LIST_DEFAULT_PADDING_EM);
   }
 
+  // CSS font-size inheritance, block channel: a block with no declared
+  // font-size inherits the nearest enclosing block container's effective
+  // size (e.g. <p> inside <li class="sized"> — the quote text must render at
+  // the list's 0.833em, not the body's 1em). Headings are exempt: their
+  // default multipliers (kHeadingMultiplier) are a deliberate stand-apart
+  // choice, not CSS fidelity. The engine composes declared block sizes as
+  // body-relative (see normalizeFontSizeForElement), so the inherited value
+  // is used as-is rather than re-scaled.
+  const bool ownHasFontSize = cssStyle.hasFontSizeMultiplier();
+  const bool inheritFontSize = !ownHasFontSize && !matches(name, HEADER_TAGS, NUM_HEADER_TAGS);
+  float enclosingFontSize = 1.0f;
+  bool enclosingHasFontSize = false;
+  for (auto it = self->blockInsetStack_.rbegin(); it != self->blockInsetStack_.rend(); ++it) {
+    if (it->hasFontSize) {
+      enclosingFontSize = it->fontSizeMultiplier;
+      enclosingHasFontSize = true;
+      break;
+    }
+  }
+  if (inheritFontSize && enclosingHasFontSize) {
+    userAlignmentBlockStyle.fontSizeMultiplier = enclosingFontSize;
+  }
+
   // This element's own inset is what its children inherit; capture it before the ancestors are
   // folded in, or each level would count itself once per descendant.
   const int16_t ownInsetLeft = userAlignmentBlockStyle.leftInset();
@@ -2965,10 +2995,14 @@ void ChapterHtmlSlimParser::startElement(void* userData, const char* name, const
     self->holdBottomSpacing(userAlignmentBlockStyle, isFloated);
   }
 
-  if ((ownInsetLeft > 0 || ownInsetRight > 0) &&
+  // The stack entry carries the FINAL size (declared or just inherited): a
+  // size-transparent wrapper still passes its parent's size down to children.
+  if ((ownInsetLeft > 0 || ownInsetRight > 0 || ownHasFontSize || enclosingHasFontSize) &&
       self->blockInsetStack_.size() < ChapterHtmlSlimParser::kMaxBlockInsetDepth &&
       matches(name, INSET_CONTAINER_TAGS, NUM_INSET_CONTAINER_TAGS)) {
-    self->blockInsetStack_.push_back({self->depth, ownInsetLeft, ownInsetRight});
+    self->blockInsetStack_.push_back({self->depth, ownInsetLeft, ownInsetRight,
+                                      userAlignmentBlockStyle.fontSizeMultiplier,
+                                      ownHasFontSize || (inheritFontSize && enclosingHasFontSize)});
   }
 
   // A <span> the book styles display:block is laid out as a block (#388): St. Martin's chapter
@@ -4388,7 +4422,7 @@ FontSizeLadder::Resolved ChapterHtmlSlimParser::resolveFamilyFont(const BlockFon
   if (r.fontId == 0) return r;
   if (!fontSizeLadder_.native()) {
     if (auxFontId_ == 0) auxFontId_ = r.fontId;
-    if (r.fontId != auxFontId_) return {0, size};  // aux budget already claimed by another size — scale fallback
+    if (r.fontId != auxFontId_) return fontSizeLadder_.resolveAgainstBudget(size * 100.0f, auxFontId_);
   }
   return r;
 }

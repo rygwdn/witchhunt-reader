@@ -247,7 +247,7 @@ class ChapterHtmlSlimParser final : public Print {
   TypographyProfile typography_;
   // One non-body font per section: body regular/bold/italic plus one auxiliary regular is
   // exactly the FontDecompressor's four page slots. The first block to resolve off-body
-  // claims the slot; blocks that would need a different font keep the scale fallback.
+  // claims the slot; later blocks choose the closer of that face and the body font.
   // A native ladder (a TTF family) has no such budget: its faces are read from the glyph store.
   int32_t auxFontId_ = 0;
   // The book's other font families (see BlockFontFamilies); empty, font-family is not looked at. A block takes one
@@ -443,6 +443,13 @@ class ChapterHtmlSlimParser final : public Print {
     int depth;
     int16_t left;
     int16_t right;
+    // The container's effective font size (body-relative multiplier, after
+    // normalization) and whether one is in scope: a block with no declared
+    // font-size inherits the nearest enclosing container's size (CSS
+    // inheritance). Entries without a declared OR inherited size are
+    // transparent to that lookup.
+    float fontSizeMultiplier = 1.0f;
+    bool hasFontSize = false;
   };
   // Insets nested deeper than this are dropped rather than tracked: the total is capped at 4em
   // either way, and a book that nests inset wrappers this deep is pathological, not typographic.

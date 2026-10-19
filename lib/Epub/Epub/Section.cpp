@@ -89,10 +89,10 @@ constexpr uint8_t SECTION_FILE_VERSION = 96;  // v96: CJK punctuation is narrowe
                                               // 18 pt (20/22/24/26), so a heading snaps to a
                                               // different face and residual than it did under
                                               // v74 and breaks across lines differently. The
-                                              // ladder is derived from the body fontId and so is
-                                              // deliberately absent from the property hash; the
-                                              // hash therefore still MATCHES, and this version
-                                              // is the only thing that rejects a v74 cache
+                                              // ladder was absent from the property hash then,
+                                              // so it still matched a v74 cache. This version
+                                              // rejected those pages before rung IDs were hashed
+                                              // in the layout property hash.
                                               // v74: the HTML `hidden` attribute now
                                               // suppresses an element, so a v73 cache still
                                               // holds the laid-out text it should have hidden
@@ -345,9 +345,10 @@ uint32_t fnv1a(const uint8_t* data, size_t length) {
 }  // namespace
 
 uint32_t Section::calculatePropertyHash(const BuildParams& p) {
-  uint8_t buffer[96];
-  static_assert(sizeof(buffer) >= 21 + sizeof(uint32_t) + BlockFontFamilies::kMaxFamilies * 3 * sizeof(int32_t),
-                "the settings (21 B) and every family fit");
+  uint8_t buffer[160];
+  static_assert(sizeof(buffer) >= 21 + sizeof(uint32_t) + BlockFontFamilies::kMaxFamilies * 3 * sizeof(int32_t) +
+                                     sizeof(int8_t) + FontSizeLadder::kMaxRungs * (sizeof(int32_t) + sizeof(uint16_t)),
+                "the settings, every family, and every ladder rung fit");
   size_t offset = 0;
 
   auto append = [&](const void* ptr, size_t size) {
@@ -379,6 +380,11 @@ uint32_t Section::calculatePropertyHash(const BuildParams& p) {
       append(&family.bodyFontId, sizeof(family.bodyFontId));
       append(&family.ladder.nativeBase, sizeof(family.ladder.nativeBase));
     }
+  }
+  append(&p.fontSizeLadder.count, sizeof(p.fontSizeLadder.count));
+  for (int i = 0; i < p.fontSizeLadder.count; ++i) {
+    append(&p.fontSizeLadder.rungs[i].fontId, sizeof(p.fontSizeLadder.rungs[i].fontId));
+    append(&p.fontSizeLadder.rungs[i].sizePct, sizeof(p.fontSizeLadder.rungs[i].sizePct));
   }
 
   return fnv1a(buffer, offset);

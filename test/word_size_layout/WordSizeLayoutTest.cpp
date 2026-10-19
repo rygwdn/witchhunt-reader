@@ -458,10 +458,11 @@ TEST(FontSizeLadderTest, SnapsToNearestRungWithResidual) {
   const auto h1 = ladder.resolve(160.0f);
   EXPECT_EQ(h1.fontId, 105);
   EXPECT_FLOAT_EQ(h1.residual, 160.0f / 128.0f);
-  // 80% (footnote) → nearest rung is 12 pt (85%), residual < 1.
+  // 80% (footnote) → nearest rung is 12 pt (85%); the down-residual snaps to
+  // the rung so the block renders with native 12 pt glyphs.
   const auto small = ladder.resolve(80.0f);
   EXPECT_EQ(small.fontId, 102);
-  EXPECT_FLOAT_EQ(small.residual, 80.0f / 85.0f);
+  EXPECT_FLOAT_EQ(small.residual, 1.0f);
   // Exact rung hit → residual 1.0.
   const auto exact = ladder.resolve(114.0f);
   EXPECT_EQ(exact.fontId, 104);
@@ -486,10 +487,16 @@ TEST(FontSizeLadderTest, ResidualDeadZoneSnapsToNativeGlyphs) {
   const auto nearBody = ladder.resolve(98.0f);
   EXPECT_EQ(nearBody.fontId, 0);
   EXPECT_FLOAT_EQ(nearBody.residual, 1.0f);
-  // 80% → 12 pt rung, residual 0.941 — OUTSIDE the zone, stays scaled.
+  // 80% → 12 pt rung; the 0.941 down-residual snaps to the rung's native size.
   const auto scaled = ladder.resolve(80.0f);
   EXPECT_EQ(scaled.fontId, 102);
-  EXPECT_FLOAT_EQ(scaled.residual, 80.0f / 85.0f);
+  EXPECT_FLOAT_EQ(scaled.residual, 1.0f);
+  // 60% is below the smallest rung (71%): it resolves to that rung with a
+  // 0.845 down-residual, which snaps to native 10 pt — the smallest size any
+  // block can render at with a non-empty ladder.
+  const auto tiny = ladder.resolve(60.0f);
+  EXPECT_EQ(tiny.fontId, 101);
+  EXPECT_FLOAT_EQ(tiny.residual, 1.0f);
   // Empty ladder (SD fonts): the zone applies to the pure-scale residual too.
   const FontSizeLadder empty;
   EXPECT_FLOAT_EQ(empty.resolve(102.0f).residual, 1.0f);
@@ -564,15 +571,18 @@ TEST(FontSizeLadderTest, AnIncompleteNativeLadderIsIgnored) {
   EXPECT_FLOAT_EQ(1.6f, ladder.resolve(160.0f).residual);  // the scale fallback
 }
 
-// scaleOf undoes resolve: the chosen font's size times the residual is the size asked for, which
-// is how the chapter parser puts a body-relative (rem) span into an already resolved block.
-TEST(FontSizeLadderTest, ScaleOfTimesResidualIsTheResolvedSize) {
+// Native and scale-only ladders honor the requested size. Bitmap faces may be enlarged
+// to avoid losing antialiasing through the downscale path.
+TEST(FontSizeLadderTest, ResolvedSizeHonorsNativeSizingAndBitmapLegibilityFloor) {
   for (const auto& ladder : {bookerly14Ladder(), nativeLadder(), FontSizeLadder{}}) {
     for (const float pct : {60.0f, 80.0f, 100.0f, 114.0f, 160.0f, 240.0f}) {
       const auto r = ladder.resolve(pct);
       const float size = ladder.scaleOf(r.fontId) * r.residual;
-      // Within the residual dead zone: resolve snaps a residual that close to 1.0.
-      EXPECT_NEAR(pct / 100.0f, size, pct / 100.0f * FontSizeLadder::kResidualDeadZone) << pct;
+      if (!ladder.native() && r.fontId != 0 && size > pct / 100.0f) {
+        EXPECT_FLOAT_EQ(1.0f, r.residual);
+      } else {
+        EXPECT_NEAR(pct / 100.0f, size, pct / 100.0f * FontSizeLadder::kResidualDeadZone) << pct;
+      }
     }
   }
   EXPECT_FLOAT_EQ(1.0f, bookerly14Ladder().scaleOf(0));
@@ -746,4 +756,21 @@ TEST_F(GuideDotsRender, SingleWordLineGetsNoDot) {
   line.render(renderer, kFontId, 0, 100);
 
   EXPECT_EQ(renderer.fillRectCalls.size(), 0u);
+}
+
+TEST(FontSizeLadderTest, ClaimedBitmapFaceCompetesWithBodyWithoutRestrictingNativeFaces) {
+  FontSizeLadder ladder;
+  ladder.addRung(202, 75);
+  ladder.addRung(203, 88);
+  const auto closerClaim = ladder.resolveAgainstBudget(83.0f, 202);
+  EXPECT_EQ(202, closerClaim.fontId);
+  EXPECT_FLOAT_EQ(83.0f / 75.0f, closerClaim.residual);
+  const auto closerBody = ladder.resolveAgainstBudget(90.0f, 202);
+  EXPECT_EQ(0, closerBody.fontId);
+  EXPECT_FLOAT_EQ(0.9f, closerBody.residual);
+  const auto down = ladder.resolveAgainstBudget(79.0f, 203);
+  EXPECT_EQ(203, down.fontId);
+  EXPECT_FLOAT_EQ(1.0f, down.residual);
+  EXPECT_EQ(nativeLadder().resolve(160.0f).fontId,
+            nativeLadder().resolveAgainstBudget(160.0f, 202).fontId);
 }

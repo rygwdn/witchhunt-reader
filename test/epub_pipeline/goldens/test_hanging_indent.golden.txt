@@ -121,13 +121,13 @@ SPINE 0 href=OEBPS/chapter1.xhtml pages=2 truncated=0 cssFallback=0
    W x=419 s=0 z=100 t=the
   LINE y=422 x=0 align=0 mult=1.000 hfid=0 words=1
    W x=0 s=0 z=100 t=panel.
-  LINE y=446 x=72 align=0 mult=1.000 hfid=0 words=2
-   W x=-72 s=0 z=100 t=Listen,
-   W x=-1 s=0 z=100 t=listen
-  LINE y=470 x=72 align=0 mult=1.000 hfid=0 words=3
-   W x=-72 s=0 z=100 t=Remember
-   W x=6 s=0 z=100 t=the
-   W x=43 s=0 z=100 t=wane
+  LINE y=446 x=69 align=0 mult=1.000 hfid=0 words=2
+   W x=-69 s=0 z=100 t=Listen,
+   W x=2 s=0 z=100 t=listen
+  LINE y=470 x=69 align=0 mult=1.000 hfid=0 words=3
+   W x=-69 s=0 z=100 t=Remember
+   W x=9 s=0 z=100 t=the
+   W x=46 s=0 z=100 t=wane
   LINE y=494 x=0 align=0 mult=1.000 hfid=0 words=9
    W x=18 s=0 z=100 t=4.
    W x=45 s=0 z=100 t=NEGATIVE

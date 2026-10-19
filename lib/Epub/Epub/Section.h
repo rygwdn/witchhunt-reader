@@ -199,9 +199,8 @@ class Section {
     bool bionicReadingEnabled = false;
     bool inlineFootnotePreviews = false;
     uint8_t imageRendering = 0;
-    // Sibling-size ladder derived from the body font (see FontSizeLadder). Not part of the
-    // property hash: it is a deterministic function of fontId, which is already hashed.
-    // Default (empty) = scale-only fallback, the right behavior for SD fonts.
+    // Rung IDs and ratios are hashed independently of the body font ID.
+    // Default (empty) preserves the selected face's scale-only fallback.
     FontSizeLadder fontSizeLadder;
     // The book's other font families (Publisher Fonts' Accents and All Text), or nullptr. Hashed when it has any and
     // the book's style is in use; empty, a book is laid out as without it. The caller's table, read when a build

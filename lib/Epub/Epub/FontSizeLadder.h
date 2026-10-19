@@ -15,13 +15,8 @@
 // (their body ID may itself carry a base scale when the card lacks the chosen
 // size -- SdCardFontManager::ensureSizeAlias -- which compounds like any other).
 //
-// Deterministic from the body fontId by construction, so it is deliberately NOT
-// part of the section-cache property hash (fontId already is). That holds WITHIN a
-// firmware version and not across one: adding or removing a rung changes which face
-// a heading resolves to for an unchanged body fontId, so the hash still matches a
-// cache laid out by the old ladder. Changing the shipped rungs is therefore a cache
-// format change and MUST bump SECTION_FILE_VERSION -- adding 20/22/24/26 pt did, and so did
-// turning 20 pt from a real face into a scaled one, which changed every one of those rungs' IDs.
+// Rung IDs and ratios are part of the section-cache property hash, so changing
+// the shipped ladder cannot reuse a layout computed with different faces.
 // Some rungs have no face of their own: 20/22/24/26 pt render the 18 pt master scaled (see
 // GfxRenderer::insertScaledFont). This struct does not need to know which, and that is worth
 // stating because an earlier note here said the opposite.
@@ -109,11 +104,44 @@ struct FontSizeLadder {
   // Snap desiredPct (percent of the body size) to the nearest rung. An empty
   // ladder, or a nearest rung of 100%, keeps the body font with the full scale
   // as residual — exactly the legacy scale-only behavior.
+  //
+  // A residual < 1.0 would render the rung through the 1-bit thresholding
+  // glyph resampler (emitScaledGlyphPixels' downscale branch keeps no AA
+  // levels), which is precisely the aliased-text look this ladder exists to
+  // avoid. So a down-residual snaps to the rung: the block renders with the
+  // rung's NATIVE glyphs at the rung's real size — a few percent larger than
+  // the CSS asked for, but crisp, anti-aliased, and floored at the smallest
+  // ladder size. Up-residuals keep the exact scale: the upscale path
+  // reconstructs 2-bit AA levels, and publisher intent is honored exactly.
   Resolved resolve(const float desiredPct) const {
     Resolved r = native() ? resolveNative(desiredPct) : resolveExact(desiredPct);
+    if (!native() && r.fontId != 0 && r.residual < 1.0f) {
+      r.residual = 1.0f;
+    }
     if (r.residual > 1.0f - kResidualDeadZone && r.residual < 1.0f + kResidualDeadZone) {
       r.residual = 1.0f;
     }
+    return r;
+  }
+
+  // Bitmap decompression has one non-body slot. Native TTF faces have no such limit.
+  Resolved resolveAgainstBudget(const float desiredPct, const int32_t claimedFontId) const {
+    if (native()) return resolve(desiredPct);
+    Resolved r;
+    r.residual = desiredPct / 100.0f;
+    for (int i = 0; claimedFontId != 0 && i < count; ++i) {
+      if (rungs[i].fontId != claimedFontId) continue;
+      const float toBody = desiredPct > 100.0f ? desiredPct - 100.0f : 100.0f - desiredPct;
+      const float toClaimed = desiredPct > rungs[i].sizePct ? desiredPct - rungs[i].sizePct
+                                                          : rungs[i].sizePct - desiredPct;
+      if (toClaimed < toBody) {
+        r.fontId = claimedFontId;
+        r.residual = desiredPct / static_cast<float>(rungs[i].sizePct);
+        if (r.residual < 1.0f) r.residual = 1.0f;
+      }
+      break;
+    }
+    if (r.residual > 1.0f - kResidualDeadZone && r.residual < 1.0f + kResidualDeadZone) r.residual = 1.0f;
     return r;
   }
 
@@ -134,7 +162,6 @@ struct FontSizeLadder {
     r.residual = target / static_cast<float>(px);
     return r;
   }
-
   Resolved resolveExact(const float desiredPct) const {
     Resolved r;
     r.residual = desiredPct / 100.0f;

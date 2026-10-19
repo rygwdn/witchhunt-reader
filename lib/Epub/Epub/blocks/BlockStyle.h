@@ -31,6 +31,14 @@ struct BlockStyle {
   // cap, effectiveWidth collapses to 1-2 words per line and justification dumps
   // the remaining space into a single gap.
   static constexpr float MAX_HORIZONTAL_INSET_EM = 4.0f;
+  // Second bound: a fraction of the viewport width. Em insets resolve against
+  // the BODY font's ascender and grow linearly with the reader's font-size
+  // setting, so a modest publisher 2-3em inset can eat a third of a 460px
+  // column at large font settings — the "block quote renders three words per
+  // line" failure. 15% per side keeps every sane book layout (most insets are
+  // well under 3em ≈ 12% at default font sizes) while stopping the blowup.
+  // The em bound stays for callers with no viewport width (0).
+  static constexpr float MAX_HORIZONTAL_INSET_VIEWPORT = 0.15f;
 
   CssTextAlign alignment = CssTextAlign::Justify;
 
@@ -154,7 +162,11 @@ struct BlockStyle {
                                  const uint16_t viewportWidth = 0) {
     BlockStyle blockStyle;
     const float vw = viewportWidth;
-    const auto maxHorizontalInsetPx = static_cast<int16_t>(emSize * MAX_HORIZONTAL_INSET_EM);
+    int16_t maxHorizontalInsetPx = static_cast<int16_t>(emSize * MAX_HORIZONTAL_INSET_EM);
+    if (viewportWidth > 0) {
+      maxHorizontalInsetPx = std::min<int16_t>(
+          maxHorizontalInsetPx, static_cast<int16_t>(vw * MAX_HORIZONTAL_INSET_VIEWPORT + 0.5f));
+    }
     // Resolve all CssLength values to pixels using the current font's em size and viewport width
     blockStyle.marginTop = cssStyle.marginTop.toPixelsInt16(emSize, vw);
     blockStyle.marginBottom = cssStyle.marginBottom.toPixelsInt16(emSize, vw);

@@ -155,6 +155,28 @@ void expectAlign(const std::vector<std::string>& sheets, const Probe& probe, con
 
 }  // namespace
 
+TEST(CssCascade, GroupedResetAndLaterHeadingEmphasisPreserveDeclaredSize) {
+  // A common EPUB reset creates many equal-hash index entries for redeclared headings.
+  // Their disk-read order is not cascade order: an emphasis-only rule must not inherit
+  // the previous candidate's size and then override a later explicit heading size.
+  resolveEverywhere({"html, body, div, span, applet, object, iframe, h1, h2, h3, h4, h5, h6, p,"
+                    "blockquote, pre, a, abbr, acronym, address, big, cite, code, del, dfn, em, img,"
+                    "ins, kbd, q, s, samp, small, strike, strong, sub, sup, tt, var, b, u, i, center,"
+                    "fieldset, form, label, legend, table, caption, tbody, tfoot, thead, tr, th, td,"
+                    "article, aside, canvas, details, embed, figure, figcaption, footer, header,"
+                    "hgroup, menu, nav, output, ruby, section, summary, time, mark, audio, video, ol,"
+                    "ul, li, dl, dt, dd { font-size: 100%; }\n"
+                    "sub { font-size: smaller; }\n"
+                    "h1 { font-size: 2em; }\n"
+                    "h6 { font-size: 1em; }\n"
+                    "h1, h2, h3, h4, h5, h6 { font-weight: bold; }\n"},
+                   {"h1", "main"}, [](const Store store, const CssStyle& style) {
+                     EXPECT_TRUE(style.hasFontSizeMultiplier()) << storeName(store);
+                     EXPECT_FLOAT_EQ(style.fontSizeMultiplier, 2.0f) << storeName(store);
+                     EXPECT_EQ(style.fontWeight, CssFontWeight::Bold) << storeName(store);
+                   });
+}
+
 // Two classes of equal specificity: the later rule in the stylesheet wins, whichever order the
 // element lists them in (crosspoint-reader PR #3891 QA: `.z{bold} .a{normal}`, class="a z").
 TEST(CssCascade, ClassOrderInTheAttributeDoesNotDecideTies) {

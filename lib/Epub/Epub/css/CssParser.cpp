@@ -1772,11 +1772,11 @@ bool CssParser::readCssStylePayload(FsFile& file, CssStyle& style) {
   if (file.read(&fontSizeMul, sizeof(fontSizeMul)) != sizeof(fontSizeMul) || file.read(&fontSizeFlags, 1) != 1) {
     return false;
   }
-  if ((fontSizeFlags & 0x1) != 0) {
-    style.fontSizeMultiplier = fontSizeMul;
-    style.fontSizeRootRelative = (fontSizeFlags & 0x2) != 0;
-    style.defined.fontSizeMultiplier = 1;
-  }
+  // Index lookups reuse the output object for several declarations of a selector.
+  // An unset size must clear the previous record's value/defined bit before cascading.
+  style.fontSizeMultiplier = fontSizeMul;
+  style.fontSizeRootRelative = (fontSizeFlags & 0x2) != 0;
+  style.defined.fontSizeMultiplier = (fontSizeFlags & 0x1) != 0;
   style.defined.fontFamily = (fontSizeFlags & 0x4) != 0 ? 1 : 0;
   uint8_t blockFlags = 0;
   if (file.read(&blockFlags, 1) != 1) {

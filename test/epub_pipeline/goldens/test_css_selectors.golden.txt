@@ -22,7 +22,7 @@ SPINE 0 href=OEBPS/chapter1.xhtml pages=1 truncated=0 cssFallback=0
    W x=257 s=0 z=100 t=the
    W x=294 s=0 z=100 t=blockquote
    W x=391 s=0 z=100 t=style.
-  LINE y=72 x=72 align=0 mult=1.000 hfid=0 words=8
+  LINE y=72 x=69 align=0 mult=1.000 hfid=0 words=8
    W x=0 s=0 z=100 t=P4
    W x=24 s=0 z=100 t=a
    W x=42 s=0 z=100 t=child
