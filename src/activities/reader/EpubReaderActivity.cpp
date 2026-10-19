@@ -88,6 +88,14 @@ static void buildBookFontFamilies(BlockFontFamilies& families, const std::string
 namespace {
 // pagesPerRefresh now comes from SETTINGS.getRefreshFrequency()
 
+bool backgroundSyncBusy() {
+#if CROSSPOINT_KOREADER_AUTOSYNC
+  return KOReaderSyncWorker::isBusy();
+#else
+  return false;
+#endif
+}
+
 // Whether the status bar shows the chapter page count, as text or as a chapter progress bar.
 bool chapterCounterShown() {
   return SETTINGS.statusBarChapterPageCount ||
@@ -1725,6 +1733,11 @@ void EpubReaderActivity::stepBackgroundSectionBuild() {
   // stale build removes its partial file) and the parse slice reads glyph metrics from
   // the shared renderer, so all of it must be serialised against the render task.
   RenderLock lock;
+  if (backgroundSyncBusy()) {
+    preRenderRearmSpine_ = -1;
+    preRenderRearmPage_ = -1;
+    return;  // Pause A re-arm, image warming, and B; current-section C is stepped separately.
+  }
   if (!epub || !section || readerPhase_ != ReaderPhase::READING || backgroundWorkSuspended_ || pendingPreRender ||
       usePreRenderedBuffer || renderer.isRefreshPending() || imageProcessingActive_) {
     return;
@@ -4287,9 +4300,14 @@ bool EpubReaderActivity::renderBufferDisplayPass(const RenderLayout& layout) {
   pendingProgressSave.pageCount = section->pageCount;
   pendingProgressSave.pending.store(true, std::memory_order_release);
 
+  const bool deferPreRender = backgroundSyncBusy();
+  if (deferPreRender) {
+    preRenderRearmSpine_ = -1;
+    preRenderRearmPage_ = -1;
+  }
   // Not during a build-through: the X3's frame buffer is the only one, and it must keep the page
   // on screen until the buffer goes back (see BG_BUILD_THROUGH_PAGES).
-  if (!backgroundBuildThrough_ && section->currentPage + 1 < section->pageCount) {
+  if (!deferPreRender && !backgroundBuildThrough_ && section->currentPage + 1 < section->pageCount) {
     pendingPreRender = true;
     markStagedForCurrentPage();
     requestUpdate();
@@ -5581,6 +5599,13 @@ void EpubReaderActivity::render(RenderLock&& lock) {
 
   // Classify the pass, then consume the pre-render flags.
   const RenderPass pass = classifyRenderPass();
+  if (pass == RenderPass::PreRender && backgroundSyncBusy()) {
+    pendingPreRender = false;
+    preRenderRearmSpine_ = -1;
+    preRenderRearmPage_ = -1;
+    LOG_DBG("ERS", "PreRender deferred: background KoSync active");
+    return;
+  }
   // First render() to get this far after a book open. Re-marking on later renders is harmless:
   // the summary is emitted at the first visible page and ignores everything after it.
   WakeTrace::mark(WakeTrace::Phase::RenderStart);
@@ -6292,6 +6317,11 @@ void EpubReaderActivity::renderContents(RenderLock& lock, std::unique_ptr<Page> 
   // display controller scans the old one. If a page turn fires during the
   // waveform it will clear preRenderedPage.ready and the stale pre-render
   // result is discarded — no correctness issue.
+  const bool deferPreRender = backgroundSyncBusy();
+  if (deferPreRender) {
+    preRenderRearmSpine_ = -1;
+    preRenderRearmPage_ = -1;
+  }
   // Not during a build-through: on the X3 the post-waveform frame sync reads this very buffer
   // when there is no second one (see BG_BUILD_THROUGH_PAGES).
   if (glyphStarvedRedraw_) {
@@ -6299,7 +6329,7 @@ void EpubReaderActivity::renderContents(RenderLock& lock, std::unique_ptr<Page> 
     // as a pre-render, which would find no more memory than this pass did. Its AA is not worth waiting for.
     glyphStarvedRedraw_ = false;
     requestUpdate();
-  } else if (!preRenderedPage.ready && !backgroundBuildThrough_ && section &&
+  } else if (!deferPreRender && !preRenderedPage.ready && !backgroundBuildThrough_ && section &&
              section->currentPage + 1 < section->pageCount) {
     pendingPreRender = true;
     markStagedForCurrentPage();

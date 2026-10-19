@@ -211,9 +211,14 @@ Where the code here is someone else's, it is credited in the source file it live
 - **Catalan, Spanish and Vietnamese gained a few labels** from crosspoint-reader before the full translation, and German's message for a chapter with no content now reads "Leeres Kapitel" instead of "Kapitelende" ("end of chapter").
 ### Reading and sync
 
+- **Automatic KOReader Sync leaves the reading page responsive.** While a background sync is
+  active, the reader pauses next-page and next-chapter preparation, including image warming, but
+  keeps visible rendering and work on the current chapter available.
 - **On X4 Pro and T5 S3, chapter-progress mapping uses PSRAM for ZIP inflate scratch when
   available.** If that allocation is unavailable, it falls back to the existing heap path; C3
   behavior is unchanged.
+- **The sleep screen shows the busy indicator while a KoSync sleep push is active**, then redraws
+  the configured sleep screen when the sleep sync wait ends.
 
 ## 2.37 — 2026-09-29
 

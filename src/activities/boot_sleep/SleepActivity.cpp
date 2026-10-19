@@ -180,7 +180,8 @@ void shipSleepGrayBase(const GfxRenderer& renderer) {
   }
 }
 
-bool renderPngSleepScreen(const std::string& filename, GfxRenderer& renderer, const BookOverlayInfo& overlayInfo) {
+bool renderPngSleepScreen(const std::string& filename, GfxRenderer& renderer, const BookOverlayInfo& overlayInfo,
+                          const bool showSyncIndicator) {
   constexpr size_t MIN_FREE_HEAP = 60 * 1024;  // PNG decoder ~42 KB + overhead
   if (ESP.getFreeHeap() < MIN_FREE_HEAP) {
     LOG_ERR("SLP", "Not enough heap for PNG sleep image: %s", filename.c_str());
@@ -323,6 +324,7 @@ bool renderPngSleepScreen(const std::string& filename, GfxRenderer& renderer, co
         // canvas as solid black. Dithering it with the image would only soften it.
         renderer.clearScreen();
         drawOverlay();
+        if (showSyncIndicator) GUI.drawBusyIndicator(renderer, false, PopupShip::Caller);
         renderer.stampBwOntoGray8Canvas(canvas, canvasStride);
         renderer.displayGray8Canvas();
         LOG_INF("SLP", "Sleep image rendered at %u levels: %s", static_cast<unsigned>(renderer.getGrayLevels()),
@@ -348,6 +350,7 @@ bool renderPngSleepScreen(const std::string& filename, GfxRenderer& renderer, co
     useCache = !config.cachePath.empty() && Storage.exists(cachePath.c_str());
   }
   drawOverlay();
+  if (showSyncIndicator) GUI.drawBusyIndicator(renderer, false, PopupShip::Caller);
   // Fire the BW scrub without waiting where that is safe (see shipSleepGrayBase): the
   // waveform runs on the controller's own RAM, so the LSB decode below (CPU/SD-only work)
   // overlaps it. copyGrayscaleLsbBuffers() drains the pending finish before its SPI plane write.
@@ -372,6 +375,7 @@ bool renderPngSleepScreen(const std::string& filename, GfxRenderer& renderer, co
     return false;
   }
   drawOverlay();
+  if (showSyncIndicator) GUI.drawBusyIndicator(renderer, false, PopupShip::Caller);
   renderer.copyGrayscaleLsbBuffers();
 
   // Pass 3: GRAYSCALE_MSB plane.
@@ -382,6 +386,7 @@ bool renderPngSleepScreen(const std::string& filename, GfxRenderer& renderer, co
     return false;
   }
   drawOverlay();
+  if (showSyncIndicator) GUI.drawBusyIndicator(renderer, false, PopupShip::Caller);
   renderer.copyGrayscaleMsbBuffers();
 
   renderer.displayGrayBuffer();
@@ -473,6 +478,7 @@ bool sleepCoverNeedsPreparing(const std::string& bookPath, bool cropped) {
 void SleepActivity::onEnter() {
 #if CROSSPOINT_KOREADER_AUTOSYNC
   const uint64_t sleepPushSeq = KOReaderAutoSync::pushStashedSleepPushAsync();
+  showSyncIndicator = KOReaderAutoSync::sleepPushPending(sleepPushSeq);
 #endif
 
   Activity::onEnter();
@@ -480,6 +486,11 @@ void SleepActivity::onEnter() {
 
 #if CROSSPOINT_KOREADER_AUTOSYNC
   KOReaderAutoSync::joinStashedSleepPush(sleepPushSeq);
+  if (showSyncIndicator) {
+    showSyncIndicator = false;
+    // Full redraw also restores grayscale/custom images that are not present in the BW framebuffer.
+    renderSleepScreen();
+  }
 #endif
 }
 
@@ -560,7 +571,7 @@ void SleepActivity::renderCustomSleepScreen() const {
     const BookOverlayInfo resolvedOverlayInfo =
         shouldLoadOverlayInfo ? getBookOverlayInfo(APP_STATE.openEpubPath) : overlayInfo;
     LOG_DBG("SLP", "Loading explicit custom sleep image: /sleep.png");
-    if (renderPngSleepScreen("/sleep.png", renderer, resolvedOverlayInfo)) {
+    if (renderPngSleepScreen("/sleep.png", renderer, resolvedOverlayInfo, showSyncIndicator)) {
       return;
     }
   }
@@ -573,7 +584,7 @@ void SleepActivity::renderCustomSleepScreen() const {
         shouldLoadOverlayInfo ? getBookOverlayInfo(APP_STATE.openEpubPath) : overlayInfo;
     const auto renderSleepImage = [&](const std::string& filename) -> bool {
       if (FsHelpers::hasPngExtension(filename)) {
-        return renderPngSleepScreen(filename, renderer, resolvedOverlayInfo);
+        return renderPngSleepScreen(filename, renderer, resolvedOverlayInfo, showSyncIndicator);
       }
       FsFile file;
       if (!Storage.openFileForRead("SLP", filename, file)) return false;
@@ -622,6 +633,7 @@ void SleepActivity::renderDefaultSleepScreen() const {
     renderer.invertScreen();
   }
 
+  drawSleepSyncIndicator();
   renderer.displayBuffer(HalDisplay::HALF_REFRESH);
 }
 
@@ -755,6 +767,12 @@ BookOverlayInfo SleepActivity::getBookOverlayInfo(const std::string& bookPath) c
   }
 
   return info;
+}
+
+void SleepActivity::drawSleepSyncIndicator() const {
+  if (showSyncIndicator) {
+    GUI.drawBusyIndicator(renderer, false, PopupShip::Caller);
+  }
 }
 
 void SleepActivity::renderBitmapSleepScreen(const Bitmap& bitmap, const BookOverlayInfo& overlayInfo) const {
@@ -916,11 +934,17 @@ void SleepActivity::renderBitmapSleepScreen(const Bitmap& bitmap, const BookOver
       const GfxRenderer::Gray8Target target{canvas, canvasStride};
       bitmap.rewindToData();
       renderer.drawBitmap(bitmap, x, y, pageWidth, pageHeight, cropX, cropY, &target);
+      drawSleepSyncIndicator();
       // Composite the overlay's whole block rather than stamping its dark pixels:
       // the block is opaque, and in mode 3 it is black with WHITE text, so a
       // stamp would drop the fill and the text with it.
       if (overlayRectHeight > 0) {
         renderer.compositeBwRectOntoGray8Canvas(target, 0, overlayRectY, pageWidth, overlayRectHeight);
+      }
+      if (showSyncIndicator) {
+        const Rect busyBounds = GUI.busyIndicatorBounds(renderer);
+        renderer.compositeBwRectOntoGray8Canvas(target, busyBounds.x, busyBounds.y, busyBounds.width,
+                                                busyBounds.height);
       }
       renderer.displayGray8Canvas();
       LOG_INF("SLP", "Sleep bitmap rendered at %u levels", static_cast<unsigned>(renderer.getGrayLevels()));
@@ -929,6 +953,7 @@ void SleepActivity::renderBitmapSleepScreen(const Bitmap& bitmap, const BookOver
   }
 
   if (!hasGreyscale) {
+    drawSleepSyncIndicator();
     renderer.displayBuffer(HalDisplay::HALF_REFRESH);
   } else {
     // Absolute planes for the BMP sleep screen follow crosspoint-reader PR
@@ -975,6 +1000,7 @@ void SleepActivity::renderBitmapSleepScreen(const Bitmap& bitmap, const BookOver
       // plane above.
       if (absolutePass) renderer.setRenderMode(GfxRenderer::BW);
       drawOverlay();
+      drawSleepSyncIndicator();
     };
 
     renderPlane(GfxRenderer::GRAYSCALE_LSB);
@@ -1092,6 +1118,7 @@ void SleepActivity::renderCoverSleepScreen() const {
 
 void SleepActivity::renderBlankSleepScreen() const {
   renderer.clearScreen();
+  drawSleepSyncIndicator();
   renderer.displayBuffer(HalDisplay::HALF_REFRESH);
 }
 
@@ -1101,6 +1128,7 @@ void SleepActivity::renderLastScreenSleepScreen() const {
   // it before the boot screen would otherwise paint.
   const auto pageHeight = renderer.getScreenHeight();
   renderer.drawImage(MoonIcon, 0, pageHeight - MOONICON_HEIGHT, MOONICON_WIDTH, MOONICON_HEIGHT);
+  drawSleepSyncIndicator();
   renderer.displayBuffer(HalDisplay::HALF_REFRESH);
 }
 
@@ -1247,9 +1275,13 @@ void SleepActivity::renderOverlaySleepScreen() const {
   const auto files = collectSleepImages(/*allowPng=*/true);
   const auto numFiles = files.size();
   if (numFiles > 0) {
-    const auto pickedIndex = pickSleepImageIndex(numFiles);
-    APP_STATE.lastSleepImage = pickedIndex;
-    APP_STATE.saveToFile();
+    const bool hasImageChoice = selectedSleepImage != static_cast<size_t>(-1);
+    if (!hasImageChoice) {
+      selectedSleepImage = pickSleepImageIndex(numFiles);
+      APP_STATE.lastSleepImage = selectedSleepImage;
+      APP_STATE.saveToFile();
+    }
+    const auto pickedIndex = selectedSleepImage;
     const std::string& selected = files[pickedIndex];
     if (FsHelpers::hasPngExtension(selected)) {
       overlayDrawn = tryDrawPngOverlay(selected);
@@ -1270,5 +1302,6 @@ void SleepActivity::renderOverlaySleepScreen() const {
   }
 
   renderer.setOrientation(savedOrientation);
+  drawSleepSyncIndicator();
   renderer.displayBuffer(HalDisplay::HALF_REFRESH);
 }

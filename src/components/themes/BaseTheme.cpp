@@ -1013,7 +1013,7 @@ void BaseTheme::shipPopup(const GfxRenderer& renderer, const PopupShip ship) {
   if (ship == PopupShip::Caller) return;  // drawn only; the caller's displayBuffer() ships it
   if (ship == PopupShip::Async) {
     renderer.triggerDisplayAsync();
-  } else {
+  } else if (ship == PopupShip::Blocking) {
     renderer.displayBuffer();
   }
 }
@@ -1069,6 +1069,11 @@ static void drawHourglass(const GfxRenderer& renderer, const int originX, const 
   line(17, 17.828f, 17, 22);
 }
 
+Rect BaseTheme::busyIndicatorBounds(const GfxRenderer& renderer) const {
+  constexpr int size = 32 + 15 * 2 + 4;  // icon, margins, frame
+  return Rect{(renderer.getScreenWidth() - size) / 2, (renderer.getScreenHeight() - size) / 2, size, size};
+}
+
 Rect BaseTheme::drawBusyIndicator(const GfxRenderer& renderer, const bool overlayDisplayedFrame,
                                   const PopupShip ship) const {
   // Same reasoning as drawPopup(): re-seed from the frame on screen so the box overlays current
@@ -1076,12 +1081,11 @@ Rect BaseTheme::drawBusyIndicator(const GfxRenderer& renderer, const bool overla
   if (overlayDisplayedFrame) renderer.syncWriteBufferFromDisplayed();
   constexpr int margin = 15;
   constexpr int icon = 32;
-  constexpr int w = icon + margin * 2;
-  constexpr int h = icon + margin * 2;
-  // Screen-centred, unlike drawPopup()'s fixed y: this one is not read alongside other chrome,
-  // and centre is where the eye already is when a screen fails to change.
-  const int x = (renderer.getScreenWidth() - w) / 2;
-  const int y = (renderer.getScreenHeight() - h) / 2;
+  const Rect bounds = busyIndicatorBounds(renderer);
+  const int x = bounds.x + 2;
+  const int y = bounds.y + 2;
+  const int w = bounds.width - 4;
+  const int h = bounds.height - 4;
 
   renderer.fillRect(x - 2, y - 2, w + 4, h + 4, true);  // frame thickness 2, matching drawPopup
   renderer.fillRect(x, y, w, h, false);

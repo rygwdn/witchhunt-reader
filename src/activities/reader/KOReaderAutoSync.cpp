@@ -252,6 +252,10 @@ uint64_t KOReaderAutoSync::pushStashedSleepPushAsync() {
   return seq;
 }
 
+bool KOReaderAutoSync::sleepPushPending(const uint64_t seq) {
+  return seq != 0 ? !KOReaderSyncWorker::isDone(seq) : !pendingSleepPush.path.empty();
+}
+
 void KOReaderAutoSync::joinStashedSleepPush(const uint64_t postedSeq) {
   uint64_t seq = postedSeq;
   unsigned long budget = SLEEP_PUSH_JOIN_TIMEOUT_MS;

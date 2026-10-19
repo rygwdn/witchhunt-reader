@@ -337,3 +337,15 @@ the first render after the build ends. `onExit()` restores it too if the reader 
   `lastRenderedSpineIndex_` / `lastRenderedPageIndex_`, read before it overwrites them. On X3 a
   "fast" request is never silently turned into a half — it's honoured, or escalated to a *full*
   only when the driver's baseline isn't synced (which the clean build/restore paths avoid).
+
+## Automatic KoSync and reader background work
+
+While the automatic KoSync worker is busy, the reader defers speculative work: Background-A
+pre-renders are not scheduled or dispatched, and image warming and Background-B slices pause.
+An active B build is paused rather than discarded. The visible page render, owed deferred grayscale
+work, and Background-C build for the section currently being read remain eligible.
+
+When sync finishes, the cleared A re-arm markers let the next idle background step schedule
+pre-rendering again. This gate applies only to automatic sync; it does not relax the TLS
+internal-heap gate or change the C3 memory policy.
+

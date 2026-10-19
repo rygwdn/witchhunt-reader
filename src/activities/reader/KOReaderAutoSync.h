@@ -89,6 +89,7 @@ class KOReaderAutoSync {
   static bool stashSleepPush(const std::string& epubPath, const KOReaderPosition& localKoPos, int spine, int page,
                              const std::string& title = "", const std::string& authors = "");
   static uint64_t pushStashedSleepPushAsync();
+  static bool sleepPushPending(uint64_t seq);
   static void joinStashedSleepPush(uint64_t seq);
 };
 

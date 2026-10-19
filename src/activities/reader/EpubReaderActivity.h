@@ -519,9 +519,9 @@ class EpubReaderActivity final : public Activity {
   // being left to the foreground "Indexing". -1 when none; cleared when the reader moves on.
   int backgroundAbandonedSpine_ = -1;
   // One-shot Background-A re-arm latch (see serviceBackgroundWork): the (spine, page)
-  // whose pre-render was already retried after the deferred AA released its memory.
+  // whose pre-render retry has already been scheduled after deferred AA releases memory.
+  // Cleared when KoSync defers the pass so the current page can be re-armed after radio work.
   // Bounds retries to one per displayed page so an image-only next page (which can
-  // never produce a pre-render) doesn't re-trigger the pass every idle tick.
   int preRenderRearmSpine_ = -1;
   int preRenderRearmPage_ = -1;
   // Escalation latch for a page that will not load off the SD (see renderNormalPass). A null
@@ -856,9 +856,9 @@ class EpubReaderActivity final : public Activity {
   uint32_t preRenderCostMax_ = 0;
   uint32_t preRenderMissCostMax_ = 0;
   bool lastPageDrewMisses_ = false;
-  // Background B: advance the idle build of the next consecutive section by one bounded
-  // step (state probe, heap gate, or one ~BG_BUILD_BUDGET_MS parse slice). Runs only after
-  // Background A has had its slice (A keeps priority: it drives perceived page-turn speed).
+  // Advance speculative work by one bounded step: Background-A re-arm, image warming, or
+  // Background-B's next-section build. Defers while background KoSync is active; current-section
+  // Background-C continues separately so visible progress is not delayed.
   // Serialises SD access against the render task via RenderLock; skips the tick instead of
   // blocking when the render task is busy.
   void stepBackgroundSectionBuild();

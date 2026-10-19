@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <string>
 
 #include "../Activity.h"
@@ -35,6 +36,11 @@ class SleepActivity final : public Activity {
   // Quick Resume: leaves the framebuffer (reader page) intact and overlays a small moon icon.
   void renderLastScreenSleepScreen() const;
   BookOverlayInfo getBookOverlayInfo(const std::string& bookPath) const;
+  void drawSleepSyncIndicator() const;
+  // Set for the first scene render when a sleep push is in flight; cleared after the wait.
+  bool showSyncIndicator = false;
+  // Preserve random image selection when the clean sleep scene is rendered again.
+  mutable std::size_t selectedSleepImage = static_cast<std::size_t>(-1);
 
   const bool fromTimeout = false;
 };
