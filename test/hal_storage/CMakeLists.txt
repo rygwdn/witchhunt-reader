@@ -4,6 +4,7 @@
 add_executable(HalStorageTest
   HalStorageTest.cpp
   ${REPO_ROOT}/lib/hal/HalStorage.cpp
+  ${REPO_ROOT}/lib/hal/StagedFileReplace.cpp
 )
 set_source_files_properties(${REPO_ROOT}/lib/hal/HalStorage.cpp PROPERTIES COMPILE_OPTIONS "-fno-exceptions")
 
