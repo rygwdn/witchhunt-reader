@@ -22,6 +22,14 @@ TEST(OpdsFormatLabel, UniqueFormatUsesBaseLabel) {
   ASSERT_EQ(buildOpdsFormatSelectionLabels(links, "catalog.example.com"), (Labels{"EPUB"}));
 }
 
+TEST(OpdsFormatLabel, FirmwareUsesFirmwareLabel) {
+  const OpdsAcquisitionLink link{
+      "/firmware/x4pro.bin", "application/vnd.crosspoint.firmware", "firmware", ".bin"};
+  const std::vector<OpdsAcquisitionLink> links{link};
+
+  ASSERT_EQ(opdsFormatSelectionLabel(link, links, "catalog.example.com"), "FIRMWARE");
+}
+
 TEST(OpdsFormatLabel, DuplicateAbsoluteUrlsIncludeHostname) {
   const std::vector<OpdsAcquisitionLink> links{
       makeLink("https://mirror-a.example.com/books/example.epub", "epub"),

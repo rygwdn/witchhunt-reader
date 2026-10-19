@@ -94,6 +94,10 @@ const char* opdsBaseFormatLabel(const OpdsAcquisitionLink& acquisition) {
     return "XTCH";
   }
 
+  if (acquisition.formatKey == "firmware") {
+    return "FIRMWARE";
+  }
+
   return "";
 }
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <utility>
 
 #include "activities/Activity.h"
 
@@ -8,8 +9,8 @@
  * SD-card based firmware update activity.
  *
  * Flow:
- *  1) onEnter -> push FileBrowserActivity in PickFirmware mode (only .bin files visible).
- *  2) On result: validate the .bin (header magic, size fits OTA partition).
+ *  1) onEnter -> validate a supplied path or push FileBrowserActivity in PickFirmware mode.
+ *  2) Validate the .bin (header magic, size fits OTA partition).
  *  3) Push ConfirmationActivity ("Update firmware?").
  *  4) On confirm: stream the file into the OTA partition via raw esp_partition APIs,
  *     drawing a progress bar; on success ESP.restart().
@@ -31,6 +32,10 @@ class SdFirmwareUpdateActivity : public Activity {
   explicit SdFirmwareUpdateActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, bool recoveryMode = false)
       : Activity("SdFirmwareUpdate", renderer, mappedInput), recoveryMode(recoveryMode) {}
 
+  // Downloads can supply a path directly; it uses the same validation and confirmation flow.
+  SdFirmwareUpdateActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string firmwarePath)
+      : Activity("SdFirmwareUpdate", renderer, mappedInput), firmwarePath(std::move(firmwarePath)) {}
+
   void onEnter() override;
   void loop() override;
   void render(RenderLock&&) override;
@@ -49,6 +54,7 @@ class SdFirmwareUpdateActivity : public Activity {
 
   void launchPicker();
   void onPickerResult(const ActivityResult& result);
+  void validateAndPrompt();
   bool validateFirmware();
   void promptConfirmation();
   void onConfirmationResult(const ActivityResult& result);

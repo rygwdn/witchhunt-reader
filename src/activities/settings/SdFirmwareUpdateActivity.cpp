@@ -18,7 +18,11 @@ void SdFirmwareUpdateActivity::onEnter() {
   Activity::onEnter();
   LOG_INF("FW", "SdFirmwareUpdateActivity build=%s %s recovery=%d", __DATE__, __TIME__, recoveryMode ? 1 : 0);
   state = State::PICKING;
-  launchPicker();
+  if (firmwarePath.empty()) {
+    launchPicker();
+    return;
+  }
+  validateAndPrompt();
 }
 
 void SdFirmwareUpdateActivity::launchPicker() {
@@ -46,6 +50,10 @@ void SdFirmwareUpdateActivity::onPickerResult(const ActivityResult& result) {
   firmwarePath = path->path;
   LOG_DBG("FW", "Selected: %s", firmwarePath.c_str());
 
+  validateAndPrompt();
+}
+
+void SdFirmwareUpdateActivity::validateAndPrompt() {
   {
     RenderLock lock(*this);
     state = State::VALIDATING;

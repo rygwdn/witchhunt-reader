@@ -12,8 +12,8 @@
 #include "OpdsServerStore.h"
 
 /**
- * Activity for browsing and downloading books from an OPDS server.
- * Supports navigation through catalog hierarchy and downloading EPUBs.
+ * Activity for browsing and downloading books or firmware from an OPDS server.
+ * Supports catalog navigation and acquisition downloads.
  */
 class OpdsBookBrowserActivity final : public Activity {
  public:

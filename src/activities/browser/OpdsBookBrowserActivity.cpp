@@ -16,6 +16,8 @@
 #include <cctype>
 #include <cstdio>
 #include <memory>
+#include <string>
+#include <utility>
 
 #include "CrossPointSettings.h"
 #include "MappedInputManager.h"
@@ -24,6 +26,7 @@
 #include "activities/NetworkMemoryTrim.h"
 #include "activities/network/NetworkMode.h"
 #include "activities/network/WifiSelectionActivity.h"
+#include "activities/settings/SdFirmwareUpdateActivity.h"
 #include "activities/util/KeyboardEntryActivity.h"
 #include "components/UITheme.h"
 #include "components/themes/ListTouchBand.h"
@@ -970,6 +973,15 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book, const OpdsAcqu
     }
     selectedBookIndex = -1;
     formatSelectionLabels.clear();
+    if (acquisition.formatKey == "firmware") {
+      startActivityForResult(
+          std::make_unique<SdFirmwareUpdateActivity>(renderer, mappedInput, std::move(filename)),
+          [this](const ActivityResult&) {
+            state = BrowserState::BROWSING;
+            requestUpdate();
+          });
+      return;
+    }
     state = BrowserState::BROWSING;
     requestUpdate();
   } else if (result == HttpDownloader::ABORTED) {

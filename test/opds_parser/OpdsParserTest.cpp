@@ -65,6 +65,12 @@ TEST(OpdsParser, EpubExtension) {
   ASSERT_TRUE(assertSingleFormat(entry, "epub", ".epub"));
 }
 
+TEST(OpdsParser, FirmwareAcquisition) {
+  OpdsEntry entry;
+  ASSERT_TRUE(parseSingleBookEntry(entry, "/firmware/x4pro.bin", "application/vnd.crosspoint.firmware"));
+  ASSERT_TRUE(assertSingleFormat(entry, "firmware", ".bin"));
+}
+
 TEST(OpdsParser, KepubDoubleExtension) {
   OpdsEntry entry;
   ASSERT_TRUE(parseSingleBookEntry(entry, "/books/example.kepub.epub"));

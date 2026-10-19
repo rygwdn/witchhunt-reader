@@ -51,6 +51,9 @@ OpdsAcquisitionLink supportedAcquisitionLink(const char* type, const char* href)
   if (strcmp(type, "text/markdown") == 0 || strcmp(type, "text/x-markdown") == 0) {
     return {href, type, "md", ".md"};
   }
+  if (strcmp(type, "application/vnd.crosspoint.firmware") == 0) {
+    return {href, type, "firmware", ".bin"};
+  }
 
   if (FsHelpers::checkFileExtension(trimmedHref, ".xtc")) {
     return {href, "application/vnd.xteink.xtc", "xtc", ".xtc"};
