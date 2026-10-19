@@ -115,6 +115,8 @@ class KOReaderSyncClient {
    * Get human-readable error message (short, for status line).
    */
   static const char* errorString(Error error);
+  /** Stable per-device identifier shared by KOReader and BookOrbit sync. */
+  static std::string deviceId();
 
   /**
    * Get a detailed diagnostic string for the last failure, combining the error

@@ -5,6 +5,8 @@ add_executable(LibraryIndexTest
   LibraryBuilderTest.cpp
   LibraryOrderTest.cpp
   LibraryStalenessTest.cpp
+  BookOrbitLocalLibraryTest.cpp
+  ${REPO_ROOT}/src/BookOrbitLocalLibrary.cpp
   ${REPO_ROOT}/test/zip_entry_reader/LoggingStub.cpp
   ${REPO_ROOT}/lib/LibraryIndex/LibraryBlob.cpp
   ${REPO_ROOT}/lib/LibraryIndex/LibraryBuilder.cpp
@@ -27,6 +29,7 @@ target_include_directories(LibraryIndexTest PRIVATE
   ${REPO_ROOT}/lib/Serialization
   ${REPO_ROOT}/lib/Logging
   ${REPO_ROOT}/lib/FsHelpers
+  ${REPO_ROOT}/src
 )
 
 target_link_libraries(LibraryIndexTest PRIVATE

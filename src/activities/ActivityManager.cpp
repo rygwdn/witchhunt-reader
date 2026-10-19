@@ -19,6 +19,7 @@
 #include "SilentRestart.h"
 #include "boot_sleep/BootActivity.h"
 #include "boot_sleep/SleepActivity.h"
+#include "browser/BookOrbitLibraryActivity.h"
 #include "browser/OpdsBookBrowserActivity.h"
 #include "components/UITheme.h"
 #include "components/themes/ButtonHintStrip.h"
@@ -539,6 +540,15 @@ void ActivityManager::goToBrowserWithSearch(std::string query) {
   }
 }
 
+void ActivityManager::goToBookOrbitLibrary() {
+  auto activity = makeUniqueNoThrow<BookOrbitLibraryActivity>(renderer, mappedInput);
+  if (!activity) {
+    LOG_ERR("ACT", "OOM: BookOrbit library activity");
+    return;
+  }
+  replaceActivity(std::move(activity));
+}
+
 void ActivityManager::goToReader(std::string path) {
   // The book's font is loaded by ReaderActivity::onEnter(), once the activity it replaces has exited.
   replaceActivity(std::make_unique<ReaderActivity>(renderer, mappedInput, std::move(path)));
@@ -642,6 +652,9 @@ void ActivityManager::goToHomeMenuAction(const HomeMenuAction action) {
       break;
     case HomeMenuAction::GlobalBookmarks:
       goToGlobalBookmarks();
+      break;
+    case HomeMenuAction::BookOrbitLibrary:
+      goToBookOrbitLibrary();
       break;
     case HomeMenuAction::FileTransfer:
       goToFileTransfer();

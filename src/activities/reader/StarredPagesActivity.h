@@ -3,6 +3,7 @@
 #include <Epub.h>
 
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "../Activity.h"

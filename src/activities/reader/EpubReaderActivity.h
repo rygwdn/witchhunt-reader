@@ -17,6 +17,8 @@
 
 #include <array>
 #include <atomic>
+#include <cstddef>
+#include <string>
 
 #include "BookmarkStore.h"
 #include "ChapterPageSpan.h"
@@ -679,12 +681,16 @@ class EpubReaderActivity final : public Activity {
   // inspection of a book should not trigger a network round-trip. Reset on every reader
   // entry; not persisted, since "session" means the lifetime of this activity instance.
   int sessionPagesAdvanced = 0;
+  // Reused across reader wake/interval bookmark snapshots; BookOrbit hashes EPUB content, not
+  // the KOReader sync id or filename-only reading-stats id.
+  std::string bookOrbitHash_;
 
 #if CROSSPOINT_KOREADER_AUTOSYNC
   bool autoSyncPullPending = false;
   unsigned long autoSyncLastPushAt = 0;
   uint64_t autoSyncPushSeq = 0;
   uint64_t autoSyncPullSeq = 0;
+  uint64_t autoSyncBookmarkSeq = 0;
   KOReaderSyncJob autoSyncPullJob;
   bool autoSyncPullJobPending = false;
   bool autoSyncPullDialogLaunched = false;
@@ -694,6 +700,8 @@ class EpubReaderActivity final : public Activity {
   void serviceAutoSync();
   bool autoSyncReaderIsQuiet() const;
   void maybeAutoPullOnWake();
+  void prepareAutoBookmarkSnapshot(KOReaderSyncJob& job, size_t changeOffset = 0);
+  bool handleAutoBookmarkResponse(KOReaderSyncJob& job, bool allowFollowup = true);
   bool pollAutoSyncPull();
   bool evaluateAutoSyncPull();
   bool handOffToInteractiveSync();
@@ -701,6 +709,7 @@ class EpubReaderActivity final : public Activity {
   void silentApplyRemote(const KOReaderProgress& remote);
   void maybeAutoPushInterval();
   void pollAutoSyncJob();
+  void pollAutoBookmarkJob();
   void maybeAutoPushOnSleep();
   void releaseAutoSyncSlot();
   KOReaderPosition currentKoPosition(int page, int pageCount) const;

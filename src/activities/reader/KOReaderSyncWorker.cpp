@@ -18,11 +18,20 @@
 #include "WifiCredentialStore.h"
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
+#include "BookOrbitReadingStatsSync.h"
+#include <BookOrbitCatalogClient.h>
+#include "BookOrbitBookmarkSync.h"
+#include "BookOrbitBookStateSync.h"
 
 namespace {
 constexpr unsigned long AUTO_CONNECT_TIMEOUT_MS = 10000;
 
 constexpr uint32_t WORKER_IDLE_EXIT_MS = KOReaderAutoSync::MIN_INTERVAL_PUSH_GAP_MS / 2;
+constexpr uint32_t BOOKMARK_ACK_IDLE_EXIT_MS = 15000;
+
+bool workerOwnsRadio = false;
+bool bookmarkRadioHeld = false;
+
 
 SemaphoreHandle_t slotMutex = nullptr;
 TaskHandle_t workerTask = nullptr;
@@ -95,57 +104,160 @@ bool connectToSavedNetwork(const unsigned long timeoutMs) {
   return true;
 }
 
-bool radioStillOursToTearDown() { return WiFi.getMode() == WIFI_MODE_STA && !activityManager.wifiActivityOnStack(); }
+bool radioStillOursToTearDown() {
+  return WiFi.getMode() == WIFI_MODE_STA && !activityManager.wifiActivityOnStack();
+}
+void releaseWorkerRadio() {
+  if (workerOwnsRadio && radioStillOursToTearDown()) {
+    WiFi.disconnect(false);
+    WiFi.mode(WIFI_OFF);
+  }
+  workerOwnsRadio = false;
+  bookmarkRadioHeld = false;
+}
+
 
 void runJob(KOReaderSyncJob& job) {
+  job.bookmarkResponseReady = false;
+  job.bookmarkSucceeded = true;
+  if (job.kind == KOReaderSyncJob::BOOKMARK_CONTINUE && !job.hasBookmarkAck && !job.hasBookmarkExchange) {
+    job.attemptOutcome = KOReaderSyncJob::DEFERRED;
+    releaseWorkerRadio();
+    return;
+  }
+  if (job.kind != KOReaderSyncJob::BOOKMARK_CONTINUE && !KOReaderAutoSync::automaticAttemptAllowed()) {
+    job.attemptOutcome = KOReaderSyncJob::DEFERRED;
+    job.result = KOReaderSyncClient::NETWORK_ERROR;
+    releaseWorkerRadio();
+    return;
+  }
   if (activityManager.wifiActivityOnStack()) {
     LOG_DBG("KOSyncWorker", "A network activity owns the radio. Skipping this job");
     job.result = KOReaderSyncClient::NETWORK_ERROR;
+    job.attemptOutcome = KOReaderSyncJob::DEFERRED;
+    job.bookmarkSucceeded = false;
+    releaseWorkerRadio();
     return;
   }
+
   logInternalHeap("before_radio_up");
   const bool startedRadio = WiFi.getMode() == WIFI_MODE_NULL;
   const unsigned long connectTimeout = job.connectTimeoutMs > 0 ? job.connectTimeoutMs : AUTO_CONNECT_TIMEOUT_MS;
   if (!connectToSavedNetwork(connectTimeout)) {
     job.result = KOReaderSyncClient::NETWORK_ERROR;
-    if (startedRadio && radioStillOursToTearDown()) {
-      WiFi.mode(WIFI_OFF);
+    job.bookmarkSucceeded = false;
+    if (WiFi.getMode() != WIFI_MODE_NULL && WiFi.getMode() != WIFI_MODE_STA) {
+      job.attemptOutcome = KOReaderSyncJob::DEFERRED;
     }
+    if (job.kind != KOReaderSyncJob::BOOKMARK_CONTINUE) KOReaderAutoSync::recordAutomaticResult(job);
+    if (startedRadio && radioStillOursToTearDown()) WiFi.mode(WIFI_OFF);
+    releaseWorkerRadio();
     return;
   }
+  if (startedRadio) workerOwnsRadio = true;
 
   logInternalHeap("after_assoc");
-
   KOReaderSyncClient::setSkipTlsValidation(SETTINGS.skipHttpsValidation != 0);
-
   HalClock::ensureUsableForTls(SETTINGS.ntpServer);
 
   switch (job.kind) {
     case KOReaderSyncJob::FETCH_PROGRESS:
       job.result = KOReaderSyncClient::getProgress(job.primaryHash, job.remote);
+      job.httpStatus = KOReaderSyncClient::lastHttpCode;
+      job.transportError = KOReaderSyncClient::lastEspError;
       if (job.smartProbe && !job.altHash.empty() && job.altHash != job.primaryHash) {
         job.altResult = KOReaderSyncClient::getProgress(job.altHash, job.altRemote);
       }
       break;
     case KOReaderSyncJob::SILENT_PUSH:
       job.result = KOReaderSyncClient::updateProgress(job.progress);
+      job.httpStatus = KOReaderSyncClient::lastHttpCode;
+      job.transportError = KOReaderSyncClient::lastEspError;
       break;
+    case KOReaderSyncJob::BOOKMARK_CONTINUE:
+      job.result = KOReaderSyncClient::OK;
+      break;
+  }
+  if (job.kind != KOReaderSyncJob::BOOKMARK_CONTINUE) {
+    if (job.result == KOReaderSyncClient::NETWORK_ERROR && job.transportError == ESP_ERR_NO_MEM &&
+        !(job.kind == KOReaderSyncJob::FETCH_PROGRESS && job.smartProbe && job.altResult == KOReaderSyncClient::OK)) {
+      job.attemptOutcome = KOReaderSyncJob::DEFERRED;
+    }
+    KOReaderAutoSync::recordAutomaticResult(job);
+  }
+  if (job.kind != KOReaderSyncJob::BOOKMARK_CONTINUE &&
+      (job.result == KOReaderSyncClient::OK ||
+       (job.kind == KOReaderSyncJob::FETCH_PROGRESS && job.result == KOReaderSyncClient::NOT_FOUND))) {
+    if (!job.bookOrbitHash.empty()) {
+      BookOrbitBookStateResult result;
+      const auto stateError = BookOrbitBookStateSync::syncActiveHash(job.bookOrbitHash, result);
+      if (stateError != BookOrbitCatalogClient::OK) {
+        LOG_INF("KOSyncWorker", "Active BookOrbit state refresh failed (%s)",
+                BookOrbitCatalogClient::errorString(stateError));
+      }
+    }
+    BookOrbitReadingStatsSync::drain();
+    BookOrbitBookStateSync::drain();
+  }
+
+  bool canExchange = true;
+  if (job.hasBookmarkAck) {
+    BookOrbitBookmarkAckRequest ack;
+    ack.books.reserve(1);
+    ack.books.push_back(std::move(job.bookmarkAck));
+    std::string response;
+    BookOrbitCatalogClient::setSkipTlsValidation(SETTINGS.skipHttpsValidation != 0);
+    BookOrbitCatalogClient::beginPersistentSession();
+    const auto result = BookOrbitCatalogClient::acknowledgeBookmarks(ack, response);
+    BookOrbitCatalogClient::endPersistentSession();
+    canExchange = result == BookOrbitCatalogClient::OK;
+    job.bookmarkSucceeded = canExchange;
+    if (!canExchange) {
+      LOG_ERR("KOSyncWorker", "Bookmark acknowledgment failed (%s)",
+              BookOrbitCatalogClient::errorString(result));
+    }
+  }
+
+  if (canExchange && job.hasBookmarkExchange) {
+    BookOrbitBookmarkExchangeRequest request;
+    request.books.reserve(1);
+    request.books.push_back(std::move(job.bookmarkExchange));
+    BookOrbitBookmarkExchangeResponse response;
+    BookOrbitCatalogClient::setSkipTlsValidation(SETTINGS.skipHttpsValidation != 0);
+    BookOrbitCatalogClient::beginPersistentSession();
+    const auto result = BookOrbitCatalogClient::exchangeBookmarks(request, response);
+    BookOrbitCatalogClient::endPersistentSession();
+    if (result == BookOrbitCatalogClient::OK) {
+      job.bookmarkResponse = {};
+      for (BookOrbitBookmarkExchangeResult& item : response.results) {
+        if (item.hash == request.books.front().hash) {
+          job.bookmarkResponse = std::move(item);
+          break;
+        }
+      }
+      if (job.bookmarkResponse.hash.empty()) job.bookmarkResponse.hash = request.books.front().hash;
+      job.bookmarkResponseReady = true;
+    } else {
+      job.bookmarkSucceeded = false;
+      LOG_ERR("KOSyncWorker", "Bookmark exchange failed (%s)", BookOrbitCatalogClient::errorString(result));
+    }
   }
   logInternalHeap("after_request");
 
-  if (startedRadio && radioStillOursToTearDown()) {
-    WiFi.disconnect(false);
-    WiFi.mode(WIFI_OFF);
-  }
+  bookmarkRadioHeld = job.bookmarkResponseReady && job.bookmarkSucceeded;
+  if (!bookmarkRadioHeld) releaseWorkerRadio();
 }
 
 void syncWorkerTrampoline(void*) {
   for (;;) {
-    if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(WORKER_IDLE_EXIT_MS)) == 0) {
+    const TickType_t idleTimeout =
+        pdMS_TO_TICKS(bookmarkRadioHeld ? BOOKMARK_ACK_IDLE_EXIT_MS : WORKER_IDLE_EXIT_MS);
+    if (ulTaskNotifyTake(pdTRUE, idleTimeout) == 0) {
       bool exiting = false;
       {
         const SlotLock lock;
         if (!slotBusy || jobDone) {
+          if (bookmarkRadioHeld) releaseWorkerRadio();
           workerTask = nullptr;
           exiting = true;
         }
@@ -205,6 +317,9 @@ namespace KOReaderSyncWorker {
 bool isBusy() { return cachedBusy.load(std::memory_order_relaxed); }
 
 bool post(KOReaderSyncJob&& job, uint64_t* seqOut) {
+  if (job.kind != KOReaderSyncJob::BOOKMARK_CONTINUE && !KOReaderAutoSync::automaticAttemptAllowed()) {
+    return false;
+  }
   if (!ensureMutex()) {
     return false;
   }

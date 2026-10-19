@@ -28,6 +28,7 @@ Welcome to **Witch Reader** firmware. This guide outlines the hardware controls,
       - [3.7.5 OPDS Servers (Multiple Libraries)](#375-opds-servers-multiple-libraries)
       - [3.7.6 Web Settings (WiFi + OPDS)](#376-web-settings-wifi--opds)
       - [3.7.7 KOReader Sync Quick Setup](#377-koreader-sync-quick-setup)
+      - [3.7.8 BookOrbit Library](#378-bookorbit-library)
     - [3.8 Sleep Screen](#38-sleep-screen)
   - [4. Reading Mode](#4-reading-mode)
     - [Page Turning](#page-turning)
@@ -584,6 +585,77 @@ A background sync leaves WiFi on if the screen you are using needs it. The X3 an
 ##### Sending the book's details
 
 **Send Document Metadata** (off by default) adds the book's details to every position it sends: its file name, title and authors, and, when the book gives them, its ISBN, Amazon ASIN, series and number in the series. A self-hosted server can use them to recognise the book; KOReader's own server ignores them. The ISBN, ASIN and series come from the Library's record of the book, so a book that has never been shown in the Library sends only its file name, title and authors. A book's `.opf` metadata file overrides them as it does its title.
+
+#### 3.7.8 BookOrbit Library
+
+If your KOReader sync server is a BookOrbit server, the Home screen gains a **BookOrbit Library** entry: a native browser for your BookOrbit collection, without the OPDS feed detour.
+The entry appears after a successful **Authenticate** against a BookOrbit server (the device asks that same server whether it serves the library API and remembers the answer). A plain kosync server simply never shows the row.
+
+The library uses the same tabbed list interface as the local Library: **Continue reading**, **Discover**, **New**, **Books**, and **Browse**. **New** appears only when the cached catalog provides a Recently added view. It opens from its SD-card cache, so entering the library does not connect to WiFi. Use **Refresh** (logical Right) when you want a current copy. Refresh advances between catalog pages; Back cancels without replacing the previous snapshot, and failed refreshes retain that snapshot too. Missing shelf covers are fetched after the refreshed views are ready; valid cached artwork is reused rather than checked for changes. The cache is tied to the configured server and username, so changing accounts never shows another account's shelf.
+
+Refresh uses BookOrbit's **catalog snapshot API**. The server freezes the selected book union, source memberships and shelf ordering for all pages of that refresh. **Readable formats only** requests EPUB, XTC, XTCH, TXT and MD together; selecting libraries, collections and smart scopes includes their union, not their intersection. Selecting no sources produces an empty catalog. This requires a server with `plugin/catalog/snapshot`; older servers are not used as a fallback.
+
+From the library you can:
+
+- Switch tabs by tapping their labels, holding Up/Down, or using Confirm while the tab bar is focused. Use Up/Down and Confirm within a list; touch follows the same Tap Action preference as the rest of the firmware.
+- **Continue reading** and **Discover** show cached shelves. **Books** lists the cached collection without duplicate shelf entries. **Browse** drills into Libraries, Collections, SmartScopes, Authors, Series, and other catalog sections, with paging rows in long lists. Each tab keeps its own navigation position; Back returns through its drilldown before leaving the library.
+- Search your collection (logical Left button while browsing).
+- Open a book for its cover, description, series, reading progress, status and rating. The overview switches between a side-by-side landscape layout and a stacked portrait layout.
+- Set a reading status (Unread / Want to read / Reading / On hold / Read / Abandoned) and a 1–5 star rating; both are written back to the server.
+- Download the book in any format your server holds for it. Downloads land in the folder set under **Settings → System → OPDS Browser → Download folder**, using the same filename format as OPDS downloads.
+- See which catalog books are downloaded and open them directly from a tab, a listing, or the book overview. The normal download path works immediately; the shared local Library index also finds a book moved to another folder with the same filename (including a case-only rename). File sizes from the catalog distinguish different copies when available; an ambiguous indexed match is not opened. Opening a cached download does not require WiFi.
+
+The library uses the same account as KOReader sync — there is nothing to configure twice. A network session still reboots on exit to restore normal memory operation, exactly as OPDS browsing and sync do; a cache-only visit does not start WiFi or require that reboot.
+
+Downloaded books belong to the same local **Library → Books / New / Authors** as other card files. Their local title, primary author, author sort name, series, ISBN and ASIN come from the book and its `.opf` sidecar through the shared metadata cache, not from a second BookOrbit metadata database. Successful downloads mark the local Library for its normal index rebuild; a refresh keeps its first-seen ordering. **Refresh** in BookOrbit updates the remote catalog and shelves, while **Refresh library** in the local New/Authors views rebuilds the local index. Server-only books, shelf membership, ratings, reading states and review-note sync remain BookOrbit data; the account-scoped offline views and covers are retained.
+
+**Performance diagnostics:** BookOrbit emits `BOCat` info-level timing lines during **Refresh**. `Generation stage=setup/snapshot/validate/publish ms=...` separates snapshot setup, streamed snapshot ingestion and local navigation finalization, staged-file validation, and publication (including live-file validation). `Generation complete` reports total milliseconds, unique book count, stored row count (including navigation and shelf references), and descriptor count. A failed generation reports its failure point, current stage duration, and elapsed total; it does not publish the incomplete snapshot.
+
+`Local BookOrbit views load` times the offline shelf and navigation load. `Library refresh complete` spans generation and view loading, excluding the preceding WiFi connection, deferred covers, and final panel refresh. `Dashboard cover backfill` separately reports elapsed time and attempted/published/failed counts for missing shelf artwork. These timings use wall-clock milliseconds, including intervening logging and scheduling.
+
+Use the serial log (`pio device monitor -e x4pro`) or the existing log viewer on development builds. Info summaries are available at `LOG_LEVEL=1` and above; rebuilding with `LOG_LEVEL=3` also emits `Generation snapshot_page` traces with page number, stored rows and `ingest_ms`. Ingestion includes HTTP transfer, streamed JSON parsing and SD writes; the snapshot stage also includes finalizing the local source navigation. It is not a network-only measurement. Per-page timing collection is compiled out below level 3. The timing logs do not include account names, catalog URLs, or book titles.
+
+Catalog Refresh needs a BookOrbit installation with the snapshot endpoint. The repository's `scripts/bookorbit_mock_server.py` exercises the older listing/detail API and does not provide snapshot refreshes.
+
+##### Starred-page sync
+
+On a BookOrbit KOReader server that advertises catalog support, starred EPUB pages are included
+with KOReader sync—manual sync and any enabled background sync use the same account. There is no
+separate bookmark-sync setting, and a plain KOReader sync server does not support this exchange.
+
+Use **Star Page** in the reader menu to add or remove the current page. Open saved stars from
+**Starred Pages** in the reader or **Bookmarks** on Home. The shared position is an EPUB structural
+location, not another reader's page number, so the firmware resolves it into this device's layout
+when you open it. Older local stars are converted from a saved local chapter layout when one is
+available; an unresolved old position remains local and is not treated as a complete list for
+deleting server bookmarks.
+
+Remote star labels are preserved in full (up to 500 Unicode characters); local renaming remains
+limited to 128 bytes. If the saved stars cannot be loaded within available memory, the firmware
+preserves the file and refuses bookmark exchange rather than uploading an empty list.
+
+##### Book state and review notes
+
+The library uses the same KOReader Sync account and BookOrbit server; there is no second account or setting. See [KOReader Sync Quick Setup](#377-koreader-sync-quick-setup) to configure the server and authenticate. BookOrbit state sync is available when the server advertises the catalog API.
+
+**Reading**, **Read** and **Abandoned** status changes, and ratings, remain queued after failed
+requests or unmatched hashes. **Unread**, **Want to read** and **On hold** use the existing online
+catalog controls.
+
+- Device/server conflicts use BookOrbit's per-field UTC modified-date rule; the server wins an equal-date
+  tie, and the device then shows the canonical server value. Opening an EPUB first refreshes that
+  value and only submits **Reading** for an eligible **Unread** or **Want to read** book. It does
+  not overwrite server **Read** or **Abandoned**, or an existing local status edit.
+- BookOrbit review notes are cached locally and shown as read-only pages in **Book Info**. Notes
+  are limited to 10,000 Unicode characters and cannot be edited on the device; a server clear is
+  reflected in the cache.
+
+##### Reading statistics
+
+Statistics upload records new timed events with a synced device clock; old aggregate history cannot
+be reconstructed. Positions are book-global location ticks, not rendered page counts.
+
+
 
 ### 3.8 Sleep Screen
 

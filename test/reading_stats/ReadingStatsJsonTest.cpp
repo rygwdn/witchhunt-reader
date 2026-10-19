@@ -116,7 +116,7 @@ TEST(ReadingStatsJsonSummary, RejectsSomethingThatIsNotJson) { scanOf("not a sta
 TEST(ReadingStatsJsonScan, DecodesTheWholeTarget) {
   const std::string head = R"({"totalSeconds":900,"books":[)";
   const std::string dated =
-      // A JSON unicode escape, six characters on disk; the parser passes it through undecoded.
+      // A JSON Unicode escape decodes to its UTF-8 character.
       R"({"docId":"d","title":"Say \"hi\" )" + std::string("\\u00e9") +
       R"(","author":"X","totalSeconds":900,"pagesTurned":9,"sessions":3,)"
       R"("firstReadEpoch":1767225600,"lastReadEpoch":1768046400,"progress":100,"finishedCount":2,)"
@@ -125,8 +125,8 @@ TEST(ReadingStatsJsonScan, DecodesTheWholeTarget) {
 
   ASSERT_EQ(books.size(), 1u);
   const BookReadingStats& b = books[0];
-  // The parser passes \u escapes through undecoded; titles are for display only.
-  EXPECT_EQ(b.title, "Say \"hi\" \\u00e9");
+  // JSON string escapes are decoded before the title reaches the caller.
+  EXPECT_EQ(b.title, "Say \"hi\" é");
   EXPECT_EQ(b.author, "X");
   EXPECT_EQ(b.totalSeconds, 900u);
   EXPECT_EQ(b.pagesTurned, 9u);

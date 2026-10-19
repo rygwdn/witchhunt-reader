@@ -8,6 +8,7 @@
 #include <HalStorage.h>
 #include <I18n.h>
 #include <KOReaderDocumentId.h>
+#include "BookOrbitBookStateStore.h"
 #include <Logging.h>
 #include <Xtc.h>
 
@@ -99,6 +100,14 @@ void BookInfoActivity::renderLoading() {
 void BookInfoActivity::loadData() {
   loadSucceeded = false;
   loadError.clear();
+  hasReview = false;
+  reviewHash.clear();
+  reviewLength = 0;
+  reviewWindowStarts.fill(0);
+  reviewWindowIndex = 0;
+  reviewLineStart = 0;
+  reviewWindowLoaded = false;
+  reviewLines.clear();
 
   // Get file size
   HalFile f = Storage.open(filePath.c_str());
@@ -163,6 +172,17 @@ void BookInfoActivity::loadData() {
       statProgress = stats.book.progress;
       statLastReadEpoch = stats.book.lastReadEpoch;
     }
+    if (FsHelpers::hasEpubExtension(filePath)) {
+      const std::string contentHash = KOReaderDocumentId::calculate(filePath);
+      BookOrbitBookStateStore::State state;
+      if (!contentHash.empty() && BookOrbitBookStateStore::read(contentHash, state) && state.reviewNoteSet &&
+          BookOrbitBookStateStore::verifyReview(contentHash)) {
+        reviewHash = contentHash;
+        reviewLength = state.reviewLength;
+        hasReview = true;
+      }
+    }
+    showingReview = hasReview && description.empty();
   }
 }
 
@@ -181,50 +201,86 @@ void BookInfoActivity::onEnter() {
 // whichever way the device is held — only which of the two comes first on screen moves, and
 // frontStripPrevious/Next answer that exactly the way mapLabels() does.
 void BookInfoActivity::loop() {
-  const auto goPrev = [this] {
-    if (descPage > 0) {
-      descPage--;
-      requestUpdate(true);
-    }
+  const auto canGoPrev = [this] {
+    if (!showingReview) return descPage > 0;
+    return reviewLineStart > 0 || reviewWindowIndex > 0 || descTotalPages > 0;
   };
-  const auto goNext = [this] {
-    if (descPage + 1 < descTotalPages) {
-      descPage++;
-      requestUpdate(true);
+  const auto canGoNext = [this] {
+    if (!showingReview) return descPage + 1 < descTotalPages || hasReview;
+    return reviewLineStart + reviewLinesPerPage < reviewLines.size() || reviewWindowEnd < reviewLength;
+  };
+  const auto goPrev = [this, &canGoPrev] {
+    if (!canGoPrev()) return;
+    if (showingReview) {
+      if (reviewLineStart > 0) {
+        reviewLineStart = reviewLineStart > static_cast<size_t>(reviewLinesPerPage)
+                              ? reviewLineStart - reviewLinesPerPage
+                              : 0;
+      } else if (reviewWindowIndex > 0) {
+        --reviewWindowIndex;
+        reviewWindowLoaded = false;
+        reviewShowLastPage = true;
+      } else {
+        showingReview = false;
+        descPage = std::max(0, descTotalPages - 1);
+      }
+    } else {
+      --descPage;
     }
+    requestUpdate(true);
+  };
+  const auto goNext = [this, &canGoNext] {
+    if (!canGoNext()) return;
+    if (!showingReview) {
+      if (descPage + 1 < descTotalPages) {
+        ++descPage;
+      } else {
+        showingReview = true;
+        reviewWindowIndex = 0;
+        reviewLineStart = 0;
+        reviewWindowLoaded = false;
+        reviewShowLastPage = false;
+      }
+    } else if (reviewLineStart + reviewLinesPerPage < reviewLines.size()) {
+      reviewLineStart += reviewLinesPerPage;
+    } else if (reviewWindowEnd < reviewLength && reviewWindowIndex + 1 < REVIEW_MAX_WINDOWS) {
+      ++reviewWindowIndex;
+      reviewWindowStarts[reviewWindowIndex] = reviewWindowEnd;
+      reviewLineStart = 0;
+      reviewWindowLoaded = false;
+    }
+    requestUpdate(true);
   };
 
-  // A description too long for one screen turns by tapping its two halves, the way a book page
-  // does. Bounded to the description band rather than using the reader's full-height zones: this
-  // screen draws a hint strip, and full-height zones would claim the taps meant for it.
-  //
-  // Only while there is somewhere to go. With a one-page description the band means nothing, and
-  // consuming taps over it would be a hole in the screen for no benefit.
+  // Description and review pages share the bounded content band, so touch navigation stays
+  // inside it rather than claiming taps from the button-hints gutter.
   int tapX = 0;
   int tapY = 0;
   if (mappedInput.hasTouch() && mappedInput.wasScreenTapped(tapX, tapY)) {
     // Copy the band under the seqlock before deciding anything with it. A torn read answers
     // "nothing here" and the tap falls through to the hint strip -- the safe way to be wrong.
     //
-    // descTotalPages is read plainly: a single aligned int is atomic on this part, and the worst
-    // a one-frame-stale count can do is let a tap through to goNext()/goPrev(), which guard.
     DescBand band;
     uint32_t before = 0;
     bool consistent = false;
-    // cppcheck-suppress knownConditionTrueFalse ; render task mutates the sequence concurrently
     if (descBandSeq.beginRead(before)) {
       band = descBand;
       consistent = descBandSeq.endRead(before);
     }
-    // cppcheck-suppress knownConditionTrueFalse ; set above, under a sequence cppcheck cannot model
-    if (consistent && descTotalPages > 1) {
+    if (consistent && (band.hasPrevious || band.hasNext)) {
       switch (TapZones::halfOfBand(tapX, tapY, band.x, band.y, band.width, band.height)) {
         case TapZones::Half::Previous:
-          goPrev();
-          return;
+          if (band.hasPrevious) {
+            goPrev();
+            return;
+          }
+          break;
         case TapZones::Half::Next:
-          goNext();
-          return;
+          if (band.hasNext) {
+            goNext();
+            return;
+          }
+          break;
         case TapZones::Half::None:
           break;
       }
@@ -241,29 +297,24 @@ void BookInfoActivity::loop() {
 }
 
 void BookInfoActivity::render(RenderLock&&) {
-  // Fast path: only the description page / button hints changed. Reuse the
-  // already-rendered header/cover/meta by clearing just those two bands. Cap
-  // consecutive partial renders to bound e-ink ghosting buildup.
+  // Fast path for the paged description/review and hints. Reuse the already-rendered
+  // header/cover/meta; cap consecutive partial renders to bound e-ink ghosting buildup.
   //
   // Requires Portrait orientation: the hints-gutter location is derived below
   // assuming the gutter sits at the bottom, which is only true in Portrait
   // (PortraitInverted puts it at the top; landscape orientations put it on a
   // side). In non-Portrait we fall through to a full render to avoid leaving
   // stale button labels in the real gutter.
-  if (fullRenderDone && loadSucceeded && !description.empty() && partialRenderCount < MAX_PARTIAL_RENDERS &&
-      renderer.getOrientation() == GfxRenderer::Portrait) {
-    // The write framebuffer holds the frame from two refreshes ago (displayBuffer() swaps
-    // buffers), so on alternating page turns it still contains the "Loading" screen or an
-    // older page rather than the current cover/meta. Resync it to the displayed frame before
-    // patching just the description/hints bands; without this the stale top section (cover or
-    // "Loading") ships back to the panel and the cover appears to flip in and out.
+  if (fullRenderDone && loadSucceeded && (!description.empty() || hasReview) &&
+      partialRenderCount < MAX_PARTIAL_RENDERS && renderer.getOrientation() == GfxRenderer::Portrait) {
+    // Resync the write framebuffer before patching the content/hints bands. This prevents a stale
+    // top section from the prior buffer swap from flashing over the current metadata.
     renderer.syncWriteBufferFromDisplayed();
     renderer.fillRect(descBand.x, descBand.y, descBand.width, descBand.height, false);
     renderer.fillRect(0, hintsBandY, renderer.getScreenWidth(), hintsBandHeight, false);
-    // No seqlock bracket here: renderDescriptionAndHints() only READS descBand (it writes the
-    // page count and the wrapped lines). Bumping the counter around it would make a concurrent
-    // tap see a torn read and drop itself for no reason.
+    descBandSeq.beginWrite();
     renderDescriptionAndHints();
+    descBandSeq.endWrite();
     ++partialRenderCount;
     renderer.displayBuffer();
     return;
@@ -318,9 +369,11 @@ void BookInfoActivity::render(RenderLock&&) {
     return;
   }
 
-  // Reserve space so description always gets at least a few lines below the cover block
-  const int descReserve = description.empty() ? 0 : (3 * lineHeightSmall + 2 * metrics.verticalSpacing);
-  const int topSectionMaxH = contentBottom - contentTop - descReserve;
+  // Keep a few lines for whichever paged description/review section follows the metadata.
+  const int descReserve =
+      (description.empty() && !hasReview) ? 0 : (3 * lineHeightSmall + 2 * metrics.verticalSpacing);
+  const int topSectionMaxH = std::max(0, contentBottom - contentTop - descReserve);
+  const int topSectionBottomLimit = contentTop + topSectionMaxH;
 
   // --- Top section: cover (left) + title/author/series (right) ---
   int topSectionBottom = contentTop;
@@ -357,7 +410,7 @@ void BookInfoActivity::render(RenderLock&&) {
   if (!title.empty()) {
     const auto lines = renderer.wrappedText(UI_12_FONT_ID, title.c_str(), metaWidth, 4);
     for (const auto& line : lines) {
-      if (metaY + lineHeightLarge > contentBottom) break;
+      if (metaY + lineHeightLarge > topSectionBottomLimit) break;
       renderer.drawText(UI_12_FONT_ID, metaX, metaY, line.c_str(), true, EpdFontFamily::BOLD);
       metaY += lineHeightLarge;
     }
@@ -367,7 +420,7 @@ void BookInfoActivity::render(RenderLock&&) {
   if (!author.empty()) {
     const auto lines = renderer.wrappedText(UI_10_FONT_ID, author.c_str(), metaWidth, 2);
     for (const auto& line : lines) {
-      if (metaY + lineHeightSmall > contentBottom) break;
+      if (metaY + lineHeightSmall > topSectionBottomLimit) break;
       renderer.drawText(UI_10_FONT_ID, metaX, metaY, line.c_str());
       metaY += lineHeightSmall;
     }
@@ -379,7 +432,7 @@ void BookInfoActivity::render(RenderLock&&) {
     if (!seriesIndex.empty()) seriesLine += " #" + seriesIndex;
     const auto lines = renderer.wrappedText(UI_10_FONT_ID, seriesLine.c_str(), metaWidth, 2);
     for (const auto& line : lines) {
-      if (metaY + lineHeightSmall > contentBottom) break;
+      if (metaY + lineHeightSmall > topSectionBottomLimit) break;
       renderer.drawText(UI_10_FONT_ID, metaX, metaY, line.c_str());
       metaY += lineHeightSmall;
     }
@@ -389,7 +442,7 @@ void BookInfoActivity::render(RenderLock&&) {
   if (fileSizeBytes > 0) {
     const std::string sizeStr = formatFileSize(fileSizeBytes);
     metaY += metrics.verticalSpacing;
-    if (metaY + lineHeightSmall <= contentBottom) {
+    if (metaY + lineHeightSmall <= topSectionBottomLimit) {
       renderer.drawText(UI_10_FONT_ID, metaX, metaY, sizeStr.c_str());
       metaY += lineHeightSmall;
     }
@@ -400,7 +453,7 @@ void BookInfoActivity::render(RenderLock&&) {
   if (hasReadingStats) {
     metaY += metrics.verticalSpacing;
     const auto drawStatRow = [&](const char* label, const std::string& value) {
-      if (value.empty() || metaY + lineHeightSmall > contentBottom) return;
+      if (value.empty() || metaY + lineHeightSmall > topSectionBottomLimit) return;
       const std::string line = std::string(label) + ": " + value;
       renderer.drawText(UI_10_FONT_ID, metaX, metaY, line.c_str());
       metaY += lineHeightSmall;
@@ -413,20 +466,18 @@ void BookInfoActivity::render(RenderLock&&) {
     drawStatRow(tr(STR_READING_STATS_LAST_READ), formatLastRead(statLastReadEpoch));
   }
 
-  topSectionBottom = std::max(topSectionBottom, metaY);
+  topSectionBottom = std::max(topSectionBottom, std::min(metaY, topSectionBottomLimit));
 
-  // --- Description: full width below the top section, paged via Left/Right ---
-  // Bracketed because loop() reads this band to resolve a tap, and it runs on the other task:
-  // a half-written rectangle would page the description the wrong way, or page one that is not
-  // on screen. Same bar the touch recorders set for the same reason.
+  // --- Paged description/review below the top section ---
+  // The band is published under descBandSeq because loop() resolves touches on the other task.
   descBandSeq.beginWrite();
-  descTotalPages = 0;
-  descLinesPerPage = 0;
+  descBand.hasPrevious = false;
+  descBand.hasNext = false;
   descBand.x = textX;
   descBand.width = textWidth;
   descBand.y = contentBottom;
   descBand.height = 0;
-  if (!description.empty()) {
+  if (!description.empty() || hasReview) {
     int y = topSectionBottom + metrics.verticalSpacing;
     if (y + lineHeightSmall + 4 < contentBottom) {
       renderer.drawLine(textX, y, contentRect.x + contentRect.width - metrics.contentSidePadding, y);
@@ -449,37 +500,101 @@ void BookInfoActivity::render(RenderLock&&) {
   renderer.displayBuffer();
 }
 
+bool BookInfoActivity::loadReviewWindow() {
+  if (reviewWindowIndex >= REVIEW_MAX_WINDOWS) return false;
+  const uint32_t start = reviewWindowStarts[reviewWindowIndex];
+  size_t safeBytes = 0;
+  if (!BookOrbitBookStateStore::readReviewWindow(
+          reviewHash, start, reviewLength, reinterpret_cast<uint8_t*>(reviewBuffer.data()), REVIEW_WINDOW_BYTES,
+          safeBytes, reviewWindowEnd) ||
+      safeBytes > REVIEW_WINDOW_BYTES) {
+    return false;
+  }
+  reviewBuffer[safeBytes] = '\0';
+  reviewLines = renderer.wrappedText(UI_10_FONT_ID, reviewBuffer.data(), descBand.width,
+                                     static_cast<int>(REVIEW_WINDOW_BYTES));
+  reviewWrappedWidth = descBand.width;
+  reviewWindowLoaded = true;
+  if (reviewShowLastPage) {
+    reviewLineStart = reviewLines.empty()
+                          ? 0
+                          : ((reviewLines.size() - 1) / static_cast<size_t>(reviewLinesPerPage)) *
+                                static_cast<size_t>(reviewLinesPerPage);
+    reviewShowLastPage = false;
+  }
+  return true;
+}
+
 void BookInfoActivity::renderDescriptionAndHints() {
   const int lineHeightSmall = renderer.getLineHeight(UI_10_FONT_ID);
+  descBand.hasPrevious = false;
+  descBand.hasNext = false;
 
-  descTotalPages = 0;
-  descLinesPerPage = 0;
+  if (!showingReview) {
+    descTotalPages = 0;
+    descLinesPerPage = 0;
+    if (!description.empty() && descBand.height > 0) {
+      descLinesPerPage = descBand.height / lineHeightSmall;
+      if (descLinesPerPage > 0) {
+        if (descLines.empty() || descWrappedWidth != descBand.width) {
+          descLines = renderer.wrappedText(UI_10_FONT_ID, description.c_str(), descBand.width, 1000);
+          descWrappedWidth = descBand.width;
+        }
+        const int totalLines = static_cast<int>(descLines.size());
+        descTotalPages = (totalLines + descLinesPerPage - 1) / descLinesPerPage;
+        if (descPage >= descTotalPages) descPage = std::max(0, descTotalPages - 1);
 
-  if (!description.empty() && descBand.height > 0) {
-    descLinesPerPage = descBand.height / lineHeightSmall;
-    if (descLinesPerPage > 0) {
-      if (descLines.empty() || descWrappedWidth != descBand.width) {
-        descLines = renderer.wrappedText(UI_10_FONT_ID, description.c_str(), descBand.width, 1000);
-        descWrappedWidth = descBand.width;
+        const int startLine = descPage * descLinesPerPage;
+        const int endLine = std::min(totalLines, startLine + descLinesPerPage);
+        int y = descBand.y;
+        const int bandBottom = descBand.y + descBand.height;
+        for (int i = startLine; i < endLine; ++i) {
+          if (y + lineHeightSmall > bandBottom) break;
+          renderer.drawText(UI_10_FONT_ID, descBand.x, y, descLines[i].c_str());
+          y += lineHeightSmall;
+        }
+        descBand.hasPrevious = descPage > 0;
+        descBand.hasNext = descPage + 1 < descTotalPages || hasReview;
       }
-      const int totalLines = static_cast<int>(descLines.size());
-      descTotalPages = (totalLines + descLinesPerPage - 1) / descLinesPerPage;
-      if (descPage >= descTotalPages) descPage = std::max(0, descTotalPages - 1);
-
-      const int startLine = descPage * descLinesPerPage;
-      const int endLine = std::min(totalLines, startLine + descLinesPerPage);
-      int y = descBand.y;
+    }
+  } else if (hasReview && descBand.height > 0) {
+    const int linesPerPage = std::max(1, (descBand.height - lineHeightSmall) / lineHeightSmall);
+    if (reviewWindowLoaded && reviewLinesPerPage != linesPerPage) {
+      reviewLineStart = (reviewLineStart / static_cast<size_t>(linesPerPage)) * static_cast<size_t>(linesPerPage);
+    }
+    reviewLinesPerPage = linesPerPage;
+    if (reviewWrappedWidth != 0 && reviewWrappedWidth != descBand.width) {
+      reviewWindowLoaded = false;
+      reviewLineStart = 0;
+      reviewShowLastPage = false;
+    }
+    const int labelY = descBand.y;
+    renderer.drawText(UI_10_FONT_ID, descBand.x, labelY, tr(STR_BO_REVIEW), true, EpdFontFamily::BOLD);
+    if (!reviewWindowLoaded && !loadReviewWindow()) {
+      LOG_ERR("BookInfo", "Could not read cached BookOrbit review for %s", reviewHash.c_str());
+      const int errorY = labelY + lineHeightSmall;
+      if (errorY + lineHeightSmall <= descBand.y + descBand.height) {
+        renderer.drawText(UI_10_FONT_ID, descBand.x, errorY, tr(STR_ERROR_GENERAL_FAILURE));
+      }
+      descBand.hasPrevious = reviewLineStart > 0 || reviewWindowIndex > 0 || descTotalPages > 0;
+    } else {
+      const int firstY = labelY + lineHeightSmall;
       const int bandBottom = descBand.y + descBand.height;
-      for (int i = startLine; i < endLine; ++i) {
+      const size_t endLine = std::min(reviewLines.size(), reviewLineStart + static_cast<size_t>(reviewLinesPerPage));
+      int y = firstY;
+      for (size_t line = reviewLineStart; line < endLine; ++line) {
         if (y + lineHeightSmall > bandBottom) break;
-        renderer.drawText(UI_10_FONT_ID, descBand.x, y, descLines[i].c_str());
+        renderer.drawText(UI_10_FONT_ID, descBand.x, y, reviewLines[line].c_str());
         y += lineHeightSmall;
       }
+      descBand.hasPrevious = reviewLineStart > 0 || reviewWindowIndex > 0 || descTotalPages > 0;
+      descBand.hasNext = reviewLineStart + static_cast<size_t>(reviewLinesPerPage) < reviewLines.size() ||
+                         reviewWindowEnd < reviewLength;
     }
   }
 
-  const char* prevLabel = (descPage > 0) ? tr(STR_PREV) : "";
-  const char* nextLabel = (descPage + 1 < descTotalPages) ? tr(STR_NEXT) : "";
+  const char* prevLabel = descBand.hasPrevious ? tr(STR_PREV) : "";
+  const char* nextLabel = descBand.hasNext ? tr(STR_NEXT) : "";
   const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", prevLabel, nextLabel);
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 }

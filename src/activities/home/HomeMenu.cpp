@@ -5,7 +5,7 @@
 namespace {
 
 // What an entry needs before it appears anywhere.
-enum class Requires : uint8_t { Nothing, Bookmarks, WeatherEnabled };
+enum class Requires : uint8_t { Nothing, Bookmarks, BookOrbitLibrary, WeatherEnabled };
 
 struct HomeMenuRow {
   HomeMenuEntry entry;
@@ -29,6 +29,9 @@ constexpr HomeMenuRow kRows[] = {
     {{HomeMenuAction::GlobalBookmarks, StrId::STR_GLOBAL_BOOKMARKS, Book},
      Requires::Bookmarks,
      &CrossPointSettings::showBookmarksOnHome},
+    {{HomeMenuAction::BookOrbitLibrary, StrId::STR_BOOKORBIT_LIBRARY, Library},
+     Requires::BookOrbitLibrary,
+     nullptr},
     {{HomeMenuAction::FileTransfer, StrId::STR_FILE_TRANSFER, Transfer},
      Requires::Nothing,
      &CrossPointSettings::showFileTransferOnHome},
@@ -46,6 +49,8 @@ bool isAvailable(const Requires requirement, const HomeMenuAvailability& availab
       return true;
     case Requires::Bookmarks:
       return availability.hasBookmarks;
+    case Requires::BookOrbitLibrary:
+      return availability.hasBookOrbitLibrary;
     case Requires::WeatherEnabled:
       return SETTINGS.useWeather != 0;
   }
@@ -71,8 +76,8 @@ void collectHomeMenuEntries(const HomeMenuPlacement placement, const HomeMenuAva
 
   for (const HomeMenuRow& row : kRows) {
     if (!isAvailable(row.requirement, availability)) continue;
-    // More goes directly above the pinned entry (Settings), the one that can never move to it.
-    if (placement == HomeMenuPlacement::Home && anyMovedToMore && row.shownOnHome == nullptr) {
+    // More goes directly above Settings, which stays visible so moved entries can be restored.
+    if (placement == HomeMenuPlacement::Home && anyMovedToMore && row.entry.action == HomeMenuAction::Settings) {
       out.push_back(kMoreEntry);
     }
     if (placementOf(row) == placement) out.push_back(row.entry);

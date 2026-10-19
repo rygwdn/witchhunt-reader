@@ -1,6 +1,8 @@
 #include <ReleaseJsonParser.h>
+#include <StreamingJsonParser.h>
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -18,6 +20,81 @@ std::string asset(const std::string& name, const std::string& digestField) {
 void feedAll(ReleaseJsonParser& parser, const std::string& json) {
   // A byte at a time, as a stream may split it anywhere.
   for (char c : json) parser.feed(&c, 1);
+}
+
+struct StreamingRecorder {
+  std::string strings;
+  std::string overflowPrefix;
+  std::string parts;
+  std::string streamed;
+  size_t stringCalls = 0;
+  size_t overflowCalls = 0;
+  size_t partCalls = 0;
+  size_t firstPartCalls = 0;
+  size_t lastPartCalls = 0;
+  size_t firstPartLength = 0;
+  size_t lastPartLength = 0;
+  size_t startCalls = 0;
+  size_t chunkCalls = 0;
+  size_t endCalls = 0;
+  bool rejectStart = false;
+  bool rejectChunk = false;
+  bool rejectEnd = false;
+
+  static StreamingRecorder& self(void* ctx) { return *static_cast<StreamingRecorder*>(ctx); }
+
+  static void onString(void* ctx, const char* value, size_t length) {
+    auto& recorder = self(ctx);
+    recorder.strings.append(value, length);
+    ++recorder.stringCalls;
+  }
+  static void onOverflow(void* ctx, const char* value, size_t length) {
+    auto& recorder = self(ctx);
+    recorder.overflowPrefix.append(value, length);
+    ++recorder.overflowCalls;
+  }
+  static void onPart(void* ctx, const char* value, size_t length, bool first, bool last) {
+    auto& recorder = self(ctx);
+    recorder.parts.append(value, length);
+    ++recorder.partCalls;
+    if (first) {
+      ++recorder.firstPartCalls;
+      recorder.firstPartLength = length;
+    }
+    if (last) {
+      ++recorder.lastPartCalls;
+      recorder.lastPartLength = length;
+    }
+  }
+  static bool onStart(void* ctx) {
+    auto& recorder = self(ctx);
+    ++recorder.startCalls;
+    return !recorder.rejectStart;
+  }
+  static bool onChunk(void* ctx, const char* value, size_t length) {
+    auto& recorder = self(ctx);
+    recorder.streamed.append(value, length);
+    ++recorder.chunkCalls;
+    return !recorder.rejectChunk;
+  }
+  static bool onEnd(void* ctx) {
+    auto& recorder = self(ctx);
+    ++recorder.endCalls;
+    return !recorder.rejectEnd;
+  }
+
+  JsonCallbacks callbacks() {
+    JsonCallbacks cb{};
+    cb.ctx = this;
+    cb.onString = onString;
+    return cb;
+  }
+};
+
+void feedChunks(StreamingJsonParser& parser, const std::string& json, const size_t chunkSize) {
+  for (size_t offset = 0; offset < json.size(); offset += chunkSize) {
+    parser.feed(json.data() + offset, std::min(chunkSize, json.size() - offset));
+  }
 }
 
 bool sameAsDigestHex(const uint8_t* bytes) {
@@ -194,6 +271,154 @@ TEST(ReleaseJsonParserNotes, ResetForgetsTitleAndNotes) {
   EXPECT_STREQ(parser.getReleaseName(), "");
   EXPECT_FALSE(parser.foundNotes());
   EXPECT_STREQ(parser.getReleaseNotes(), "");
+}
+
+
+TEST(StreamingJsonParserCallbacks, OverflowPrefixIsDeliveredOnceAndLongValueIsDropped) {
+  StreamingRecorder recorder;
+  JsonCallbacks callbacks = recorder.callbacks();
+  callbacks.onStringOverflow = StreamingRecorder::onOverflow;
+  StreamingJsonParser parser(callbacks);
+  const std::string body(1200, 'x');
+  const std::string json = R"({"body":")" + body + R"(","next":"ok"})";
+
+  feedChunks(parser, json, 17);
+
+  EXPECT_FALSE(parser.hasError());
+  EXPECT_EQ(recorder.overflowCalls, 1u);
+  EXPECT_EQ(recorder.overflowPrefix, body.substr(0, StreamingJsonParser::TOKEN_BUF_SIZE - 1));
+  EXPECT_EQ(recorder.stringCalls, 1u);
+  EXPECT_EQ(recorder.strings, "ok");
+}
+
+TEST(StreamingJsonParserCallbacks, LongStringPartsReassembleWithFirstAndLastMarkers) {
+  StreamingRecorder recorder;
+  JsonCallbacks callbacks = recorder.callbacks();
+  callbacks.onStringPart = StreamingRecorder::onPart;
+  StreamingJsonParser parser(callbacks);
+  const std::string body(1400, 'p');
+  const std::string json = R"({"body":")" + body + R"("})";
+
+  feedChunks(parser, json, 23);
+
+  EXPECT_FALSE(parser.hasError());
+  EXPECT_EQ(recorder.parts, body);
+  EXPECT_GT(recorder.partCalls, 1u);
+  EXPECT_EQ(recorder.firstPartCalls, 1u);
+  EXPECT_EQ(recorder.lastPartCalls, 1u);
+  EXPECT_EQ(recorder.firstPartLength, StreamingJsonParser::TOKEN_BUF_SIZE - 1);
+  EXPECT_EQ(recorder.lastPartLength, body.size() - 2 * (StreamingJsonParser::TOKEN_BUF_SIZE - 1));
+}
+
+TEST(StreamingJsonParserCallbacks, ResetClearsLongStringPartState) {
+  StreamingRecorder recorder;
+  JsonCallbacks callbacks = recorder.callbacks();
+  callbacks.onStringPart = StreamingRecorder::onPart;
+  StreamingJsonParser parser(callbacks);
+
+  const std::string incomplete = R"({"body":")" + std::string(StreamingJsonParser::TOKEN_BUF_SIZE, 'a');
+  parser.feed(incomplete.data(), incomplete.size());
+  ASSERT_EQ(recorder.firstPartCalls, 1u);
+
+  parser.reset();
+  const std::string body(1400, 'b');
+  const std::string json = R"({"body":")" + body + R"("})";
+  feedChunks(parser, json, 23);
+
+  EXPECT_FALSE(parser.hasError());
+  EXPECT_EQ(recorder.firstPartCalls, 2u);
+  EXPECT_EQ(recorder.parts.substr(StreamingJsonParser::TOKEN_BUF_SIZE - 1), body);
+}
+
+
+
+TEST(StreamingJsonParserCallbacks, StreamingKeepsFullUnicodeStringAcrossChunks) {
+  StreamingRecorder recorder;
+  JsonCallbacks callbacks = recorder.callbacks();
+  callbacks.onStringStart = StreamingRecorder::onStart;
+  callbacks.onStringChunk = StreamingRecorder::onChunk;
+  callbacks.onStringEnd = StreamingRecorder::onEnd;
+  StreamingJsonParser parser(callbacks);
+  const std::string json = R"({"body":")" + std::string(63, 'a') + R"(\uD83D\uDE80)" + std::string(700, 'b') +
+                           R"("})";
+  const std::string expected = std::string(63, 'a') + "\xF0\x9F\x9A\x80" + std::string(700, 'b');
+
+  feedChunks(parser, json, 11);
+
+  EXPECT_FALSE(parser.hasError());
+  EXPECT_EQ(recorder.streamed, expected);
+  EXPECT_GT(recorder.chunkCalls, 1u);
+  EXPECT_EQ(recorder.startCalls, 1u);
+  EXPECT_EQ(recorder.endCalls, 1u);
+  EXPECT_EQ(recorder.stringCalls, 0u);
+}
+
+TEST(StreamingJsonParserCallbacks, StartCallbackCanRejectAString) {
+  StreamingRecorder recorder;
+  recorder.rejectStart = true;
+  JsonCallbacks callbacks = recorder.callbacks();
+  callbacks.onStringStart = StreamingRecorder::onStart;
+  callbacks.onStringChunk = StreamingRecorder::onChunk;
+  callbacks.onStringEnd = StreamingRecorder::onEnd;
+  StreamingJsonParser parser(callbacks);
+  const std::string json = R"({"body":"value"})";
+
+  feedChunks(parser, json, json.size());
+
+  EXPECT_TRUE(parser.hasError());
+  EXPECT_EQ(recorder.startCalls, 1u);
+  EXPECT_EQ(recorder.chunkCalls, 0u);
+  EXPECT_EQ(recorder.endCalls, 0u);
+}
+
+TEST(StreamingJsonParserCallbacks, ChunkCallbackCanRejectAString) {
+  StreamingRecorder recorder;
+  recorder.rejectChunk = true;
+  JsonCallbacks callbacks = recorder.callbacks();
+  callbacks.onStringStart = StreamingRecorder::onStart;
+  callbacks.onStringChunk = StreamingRecorder::onChunk;
+  callbacks.onStringEnd = StreamingRecorder::onEnd;
+  StreamingJsonParser parser(callbacks);
+  const std::string json = R"({"body":")" + std::string(100, 'v') + R"("})";
+
+  feedChunks(parser, json, json.size());
+
+  EXPECT_TRUE(parser.hasError());
+  EXPECT_EQ(recorder.startCalls, 1u);
+  EXPECT_EQ(recorder.chunkCalls, 1u);
+  EXPECT_EQ(recorder.endCalls, 0u);
+}
+
+TEST(StreamingJsonParserCallbacks, EndCallbackCanRejectAString) {
+  StreamingRecorder recorder;
+  recorder.rejectEnd = true;
+  JsonCallbacks callbacks = recorder.callbacks();
+  callbacks.onStringStart = StreamingRecorder::onStart;
+  callbacks.onStringChunk = StreamingRecorder::onChunk;
+  callbacks.onStringEnd = StreamingRecorder::onEnd;
+  StreamingJsonParser parser(callbacks);
+  const std::string json = R"({"body":"short"})";
+
+  feedChunks(parser, json, json.size());
+
+  EXPECT_TRUE(parser.hasError());
+  EXPECT_EQ(recorder.startCalls, 1u);
+  EXPECT_EQ(recorder.chunkCalls, 1u);
+  EXPECT_EQ(recorder.endCalls, 1u);
+}
+
+TEST(StreamingJsonParserCallbacks, OrdinaryTokenOverflowDropsOnlyTheOverlongValue) {
+  StreamingRecorder recorder;
+  JsonCallbacks callbacks = recorder.callbacks();
+  StreamingJsonParser parser(callbacks);
+  const std::string body(1200, 'z');
+  const std::string json = R"({"body":")" + body + R"(","next":"ok"})";
+
+  feedChunks(parser, json, 31);
+
+  EXPECT_FALSE(parser.hasError());
+  EXPECT_EQ(recorder.stringCalls, 1u);
+  EXPECT_EQ(recorder.strings, "ok");
 }
 
 }  // namespace

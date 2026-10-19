@@ -1,5 +1,6 @@
 #include "KOReaderAuthActivity.h"
 
+#include <BookOrbitCatalogClient.h>
 #include <GfxRenderer.h>
 #include <HalClock.h>
 #include <I18n.h>
@@ -65,12 +66,30 @@ void KOReaderAuthActivity::onWifiSelectionComplete(const bool success) {
 
 void KOReaderAuthActivity::performAuthentication() {
   const auto result = KOReaderSyncClient::authenticate();
+  bool catalogAvailable = false;
+
+  if (result == KOReaderSyncClient::OK) {
+    // Working credentials are also the only thing the BookOrbit catalog API
+    // needs, so ask the same server — once, here — whether it serves one. The
+    // verdict is persisted so the home screen can offer (or hide) the library
+    // without a network round-trip. Failure is not an authentication failure:
+    // a plain kosync server answering 404 is the normal "no catalog" case.
+    BookOrbitCatalogClient::setSkipTlsValidation(SETTINGS.skipHttpsValidation != 0);
+    const auto probe = BookOrbitCatalogClient::probeCapabilities();
+    catalogAvailable = probe == BookOrbitCatalogClient::OK;
+    if (catalogAvailable != KOREADER_STORE.getCatalogCapable()) {
+      KOREADER_STORE.setCatalogCapable(catalogAvailable);
+      KOREADER_STORE.saveToFile();
+    }
+    LOG_INF("KOAuth", "BookOrbit catalog probe: %s", BookOrbitCatalogClient::errorString(probe));
+  }
 
   {
     RenderLock lock(*this);
     if (result == KOReaderSyncClient::OK) {
       state = SUCCESS;
       statusMessage = tr(STR_AUTH_SUCCESS);
+      catalogDetected = catalogAvailable;
     } else {
       state = FAILED;
       errorMessage = KOReaderSyncClient::errorString(result);
@@ -173,6 +192,9 @@ void KOReaderAuthActivity::render(RenderLock&&) {
     const char* successMsg = (mode == Mode::REGISTER) ? tr(STR_REGISTER_SUCCESS) : tr(STR_AUTH_SUCCESS);
     renderer.drawCenteredText(UI_10_FONT_ID, top, successMsg, true, EpdFontFamily::BOLD);
     renderer.drawCenteredText(UI_10_FONT_ID, top + height + 10, tr(STR_SYNC_READY));
+    if (catalogDetected) {
+      renderer.drawCenteredText(UI_10_FONT_ID, top + 2 * (height + 10), tr(STR_BOOKORBIT_DETECTED));
+    }
   } else if (state == USER_EXISTS) {
     renderer.drawCenteredText(UI_10_FONT_ID, top, tr(STR_USERNAME_TAKEN), true, EpdFontFamily::BOLD);
     renderer.drawCenteredText(UI_10_FONT_ID, top + height + 10, errorMessage.c_str());

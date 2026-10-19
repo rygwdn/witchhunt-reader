@@ -10,6 +10,7 @@
 #include <HeapPools.h>
 #include <I18n.h>
 #include <JpegToBmpConverter.h>
+#include <KOReaderCredentialStore.h>
 #include <Logging.h>
 #include <Memory.h>
 #include <PngToBmpConverter.h>
@@ -126,8 +127,9 @@ int getHomeCoverRenderHeight(const HomeScreenLayout& layout) {
 // dispatches Confirm based on action) and render() (which draws labels/icons).
 void HomeActivity::rebuildMenuEntries() {
   menuEntries.clear();
-  menuEntries.reserve(6);  // all six shown, or five plus More
-  const HomeMenuAvailability availability{.hasBookmarks = !GLOBAL_BOOKMARKS.isEmpty()};
+  menuEntries.reserve(7);  // all seven shown, or six plus More
+  const HomeMenuAvailability availability{.hasBookmarks = !GLOBAL_BOOKMARKS.isEmpty(),
+                                          .hasBookOrbitLibrary = hasBookOrbitLibrary};
   collectHomeMenuEntries(HomeMenuPlacement::Home, availability, menuEntries);
   menuEntriesDirty = false;
 }
@@ -514,6 +516,10 @@ void HomeActivity::onEnter() {
     }
   }
 
+  // The library row is offered only when the configured KOReader server was
+  // found to serve BookOrbit's catalog (probed during authentication and cached
+  // on SD), so a plain kosync account never grows a dead menu entry.
+  hasBookOrbitLibrary = KOREADER_STORE.hasCredentials() && KOREADER_STORE.getCatalogCapable();
   selectorIndex = 0;
   recentsLoading = false;
   recentsLoaded = false;

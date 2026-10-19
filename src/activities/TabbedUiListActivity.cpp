@@ -9,15 +9,15 @@ namespace fui = freeink::ui;
 
 namespace {
 // A tabbed list switches tabs on a long Up/Down instead of jumping to its ends (spec R4).
-ListDeclaration tabbedDeclaration() {
-  ListDeclaration declaration;
+ListDeclaration tabbedDeclaration(ListDeclaration declaration) {
   declaration.tabbed = true;
   return declaration;
 }
 }  // namespace
 
-TabbedUiListActivity::TabbedUiListActivity(const char* name, GfxRenderer& renderer, MappedInputManager& mappedInput)
-    : UiListActivity(name, renderer, mappedInput, tabbedDeclaration()) {}
+TabbedUiListActivity::TabbedUiListActivity(const char* name, GfxRenderer& renderer, MappedInputManager& mappedInput,
+                                         const ListDeclaration& declaration)
+    : UiListActivity(name, renderer, mappedInput, tabbedDeclaration(declaration)) {}
 
 void TabbedUiListActivity::onEnter() {
   // One ListNav per tab, so each remembers its own row and scroll position; all open on the bar.

@@ -17,14 +17,15 @@ void writeString(FsFile& f, const std::string& s) {
   }
 }
 
-bool readString(FsFile& f, std::string& out) {
+bool readString(FsFile& f, std::string& out, const uint16_t maxLength = UINT16_MAX) {
   uint16_t len = 0;
-  if (f.read(reinterpret_cast<uint8_t*>(&len), sizeof(len)) != sizeof(len)) return false;
+  if (f.read(reinterpret_cast<uint8_t*>(&len), sizeof(len)) != sizeof(len) || len > maxLength) return false;
   out.clear();
   if (len == 0) return true;
   out.resize(len);
   return f.read(reinterpret_cast<uint8_t*>(&out[0]), len) == len;
 }
+
 
 constexpr uint16_t MAX_ENTRIES = 1000;
 constexpr uint16_t MAX_BOOKMARKS_PER_ENTRY = 1000;
@@ -46,11 +47,12 @@ void GlobalBookmarkIndex::load() {
   }
 
   uint8_t version = 0;
-  if (f.read(&version, 1) != 1 || version != FILE_VERSION) {
+  if (f.read(&version, 1) != 1 || version < 1 || version > FILE_VERSION) {
     LOG_ERR("GBI", "Bad version: %u", version);
     f.close();
     return;
   }
+
 
   uint16_t entryCount = 0;
   if (f.read(reinterpret_cast<uint8_t*>(&entryCount), sizeof(entryCount)) != sizeof(entryCount) ||
@@ -92,6 +94,16 @@ void GlobalBookmarkIndex::load() {
         f.close();
         return;
       }
+      if (version >= 2 &&
+          (f.read(reinterpret_cast<uint8_t*>(&bm.remoteServerId), sizeof(bm.remoteServerId)) !=
+               sizeof(bm.remoteServerId) ||
+           !readString(f, bm.syncMetadata, BookmarkStore::MAX_SYNC_METADATA_LENGTH))) {
+        LOG_ERR("GBI", "Truncated bookmark sync metadata");
+        entries.clear();
+        f.close();
+        return;
+      }
+
       e.bookmarks.push_back(std::move(bm));
     }
     entries.push_back(std::move(e));
@@ -126,6 +138,8 @@ void GlobalBookmarkIndex::save() const {
       f.write(reinterpret_cast<const uint8_t*>(&bm.spineIndex), sizeof(bm.spineIndex));
       f.write(reinterpret_cast<const uint8_t*>(&bm.pageNumber), sizeof(bm.pageNumber));
       writeString(f, bm.name);
+      f.write(reinterpret_cast<const uint8_t*>(&bm.remoteServerId), sizeof(bm.remoteServerId));
+      writeString(f, bm.syncMetadata);
     }
   }
   f.close();

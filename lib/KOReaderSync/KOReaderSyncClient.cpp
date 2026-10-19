@@ -183,7 +183,7 @@ bool shouldRejectBody(int httpCode, const std::string& body) {
 
 // Device identifier for CrossPoint reader
 constexpr char DEVICE_NAME[] = "CrossPoint";
-constexpr char DEVICE_ID[] = "crosspoint-reader";
+
 
 // Keep strict thresholding here. A small tolerance caused repeated handshake
 // attempts in borderline-fragmented states that still failed in the TLS layer.
@@ -398,6 +398,17 @@ esp_err_t performKoRequest(const char* method, const std::string& url, const cha
   }
 }
 }  // namespace
+std::string KOReaderSyncClient::deviceId() {
+  std::string id = "crosspoint-";
+  id.reserve(23);  // 11-byte prefix plus 12 hexadecimal MAC digits.
+  const String mac = WiFi.macAddress();
+  for (const char* digit = mac.c_str(); *digit != '\0'; ++digit) {
+    if (std::isxdigit(static_cast<unsigned char>(*digit))) {
+      id += static_cast<char>(std::tolower(static_cast<unsigned char>(*digit)));
+    }
+  }
+  return id;
+}
 
 // Returns true if credentials are present; logs and returns false otherwise.
 static inline bool hasCredentials() {
@@ -619,7 +630,7 @@ KOReaderSyncClient::Error KOReaderSyncClient::updateProgress(const KOReaderProgr
   doc["progress"] = progress.progress;
   doc["percentage"] = progress.percentage;
   doc["device"] = DEVICE_NAME;
-  doc["device_id"] = DEVICE_ID;
+  doc["device_id"] = deviceId();
 
   if (progress.metadata) {
     JsonObject meta = doc["metadata"].to<JsonObject>();

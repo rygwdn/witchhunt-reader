@@ -35,14 +35,16 @@ class HomeMenuTest : public ::testing::Test {
     SETTINGS.useWeather = 1;
   }
 
-  HomeMenuAvailability everything{.hasBookmarks = true};
-  HomeMenuAvailability nothingOptional{.hasBookmarks = false};
+  HomeMenuAvailability everything{.hasBookmarks = true,
+                                  .hasBookOrbitLibrary = true};
+  HomeMenuAvailability nothingOptional{.hasBookmarks = false,
+                                       .hasBookOrbitLibrary = false};
 };
 
 TEST_F(HomeMenuTest, DefaultsShowEverythingAvailableAndNoMore) {
-  EXPECT_EQ(
-      actionsAt(HomeMenuPlacement::Home, everything),
-      (std::vector<A>{A::Library, A::ReadingStats, A::GlobalBookmarks, A::FileTransfer, A::Weather, A::Settings}));
+  EXPECT_EQ(actionsAt(HomeMenuPlacement::Home, everything),
+            (std::vector<A>{A::Library, A::ReadingStats, A::GlobalBookmarks,
+                            A::BookOrbitLibrary, A::FileTransfer, A::Weather, A::Settings}));
   EXPECT_TRUE(actionsAt(HomeMenuPlacement::More, everything).empty());
 }
 
@@ -55,7 +57,8 @@ TEST_F(HomeMenuTest, AHiddenEntryMovesBehindMoreWhichSitsAboveSettings) {
   SETTINGS.showFileTransferOnHome = 0;
 
   EXPECT_EQ(actionsAt(HomeMenuPlacement::Home, everything),
-            (std::vector<A>{A::Library, A::ReadingStats, A::GlobalBookmarks, A::Weather, A::More, A::Settings}));
+            (std::vector<A>{A::Library, A::ReadingStats, A::GlobalBookmarks,
+                            A::BookOrbitLibrary, A::Weather, A::More, A::Settings}));
   EXPECT_EQ(actionsAt(HomeMenuPlacement::More, everything), (std::vector<A>{A::FileTransfer}));
 }
 
@@ -94,9 +97,11 @@ TEST_F(HomeMenuTest, SettingsStaysWhenEverythingElseIsHidden) {
   SETTINGS.showFileTransferOnHome = 0;
   SETTINGS.showWeatherOnHome = 0;
 
-  EXPECT_EQ(actionsAt(HomeMenuPlacement::Home, everything), (std::vector<A>{A::More, A::Settings}));
+  EXPECT_EQ(actionsAt(HomeMenuPlacement::Home, everything),
+            (std::vector<A>{A::BookOrbitLibrary, A::More, A::Settings}));
   EXPECT_EQ(actionsAt(HomeMenuPlacement::More, everything),
-            (std::vector<A>{A::Library, A::ReadingStats, A::GlobalBookmarks, A::FileTransfer, A::Weather}));
+            (std::vector<A>{A::Library, A::ReadingStats, A::GlobalBookmarks,
+                            A::FileTransfer, A::Weather}));
 }
 
 // Every entry is reachable from exactly one place, whatever the settings say.

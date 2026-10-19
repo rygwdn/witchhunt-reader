@@ -2,6 +2,7 @@
 
 #include <GfxRenderer.h>
 #include <I18n.h>
+#include <KOReaderCredentialStore.h>
 
 #include "GlobalBookmarkIndex.h"
 #include "MappedInputManager.h"
@@ -10,7 +11,9 @@
 
 HomeMoreActivity::HomeMoreActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
     : MenuListActivity("HomeMore", renderer, mappedInput) {
-  const HomeMenuAvailability availability{.hasBookmarks = !GLOBAL_BOOKMARKS.isEmpty()};
+  const HomeMenuAvailability availability{.hasBookmarks = !GLOBAL_BOOKMARKS.isEmpty(),
+                                          .hasBookOrbitLibrary = KOREADER_STORE.hasCredentials() &&
+                                                                 KOREADER_STORE.getCatalogCapable()};
   std::vector<HomeMenuEntry> entries;
   entries.reserve(5);
   collectHomeMenuEntries(HomeMenuPlacement::More, availability, entries);

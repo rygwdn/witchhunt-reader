@@ -80,6 +80,7 @@ class UiListActivity : public Activity, protected UiAppHost {
   // more than leave overrides it.
   virtual void homeFromList();
   virtual void switchTab(int /*direction*/) {}
+  virtual void onListAction(ListGrammar::Side /*side*/, int /*position*/) {}
 
   // The content area a list lays out in: room for the bottom hints AND the side Up/Down boxes.
   [[nodiscard]] Rect listContentRect() const;
@@ -137,6 +138,9 @@ class UiListActivity : public Activity, protected UiAppHost {
     void onListBack() override { list.backFromPosition(list.selectedPosition()); }
     void onListHome() override { list.homeFromList(); }
     void onListTab(const int direction) override { list.switchTab(direction); }
+    void onListAction(const ListGrammar::Side side, const int position) override {
+      list.onListAction(side, position);
+    }
     UiListActivity& list;
   };
 

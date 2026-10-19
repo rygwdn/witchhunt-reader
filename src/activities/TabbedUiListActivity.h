@@ -22,7 +22,8 @@
 // (develop @ cdac66ffe, src/activities/UiTabListActivity.cpp).
 class TabbedUiListActivity : public UiListActivity {
  protected:
-  TabbedUiListActivity(const char* name, GfxRenderer& renderer, MappedInputManager& mappedInput);
+  TabbedUiListActivity(const char* name, GfxRenderer& renderer, MappedInputManager& mappedInput,
+                       const ListDeclaration& declaration = {});
 
   // Most tabs any one screen may show. Only bounds the stack array buildTabBar() composes from.
   static constexpr int MAX_TABS = 8;

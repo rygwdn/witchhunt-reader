@@ -134,6 +134,15 @@ time_t lastSyncTime();
 /// from a source that ran through the sleep — the DS3231 or the LP timer — can
 /// produce a real figure; see the definition in HalClock.cpp.
 uint32_t lastSleepSeconds();
+/// Read the ESP low-power RTC timer in microseconds. Unlike millis() and the
+/// wall clock, this value is monotonic across deep sleep while the RTC clock
+/// domain remains powered; it resets on cold power-on/brownout.
+uint64_t retainedMonotonicUs();
+
+/// True only for reset reasons that indicate a cold power start. Software,
+/// watchdog, and deep-sleep resets retain RTC state and return false.
+bool isColdBoot();
+
 
 /// Format the current time for display.  Returns "--:--" if the clock was
 /// never synced, prefixes with "~" if approximate.

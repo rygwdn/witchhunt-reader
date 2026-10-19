@@ -35,8 +35,16 @@ size_t copyBounded(char* dst, const size_t dstSize, const char* src, const size_
 }  // namespace
 
 FontManifestParser::FontManifestParser(const FontManifestCallbacks& callbacks)
-    : json(JsonCallbacks{this, sOnKey, sOnString, sOnNumber, sOnBool, sOnNull, sOnObjectStart, sOnObjectEnd,
-                         sOnArrayStart, sOnArrayEnd}),
+    : json(JsonCallbacks{.ctx = this,
+                         .onKey = sOnKey,
+                         .onString = sOnString,
+                         .onNumber = sOnNumber,
+                         .onBool = sOnBool,
+                         .onNull = sOnNull,
+                         .onObjectStart = sOnObjectStart,
+                         .onObjectEnd = sOnObjectEnd,
+                         .onArrayStart = sOnArrayStart,
+                         .onArrayEnd = sOnArrayEnd}),
       cb(callbacks) {
   reset();
 }

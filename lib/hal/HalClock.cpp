@@ -11,6 +11,7 @@
 #include <Wire.h>  // Needed for I2C communication with the RTC
 #include <esp_private/esp_clk.h>
 #include <esp_sntp.h>
+#include <esp_system.h>
 #include <sys/time.h>
 #include <time.h>
 
@@ -1087,6 +1088,13 @@ bool ensureUsableForTls(const char* preferredServer) {
 time_t lastSyncTime() { return nvsReadSyncTime(); }
 
 uint32_t lastSleepSeconds() { return lastSleepSec; }
+
+uint64_t retainedMonotonicUs() { return esp_clk_rtc_time(); }
+
+bool isColdBoot() {
+  const esp_reset_reason_t reason = esp_reset_reason();
+  return reason == ESP_RST_POWERON || reason == ESP_RST_BROWNOUT;
+}
 
 void formatTime(char* buf, size_t bufSize, bool use24h) {
   if (!isSynced()) {

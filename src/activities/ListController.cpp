@@ -294,7 +294,9 @@ void ListController::drawHints(GfxRenderer& renderer, const char* backLabel, con
   char right[48];
   composeFront(left, sizeof(left), kPrevGlyph, labels.left, declaration.left.label, StrId::STR_DIR_UP);
   composeFront(right, sizeof(right), kNextGlyph, labels.right, declaration.right.label, StrId::STR_DIR_DOWN);
-  const auto hints = input.mapHints(backLabel, confirmLabel, left, right, tr(STR_DIR_UP), tr(STR_DIR_DOWN));
+  const auto hints = input.mapHints(backLabel, confirmLabel, left, right,
+                                    declaration.tabbed ? tr(STR_DIR_UP_OR_TAB) : tr(STR_DIR_UP),
+                                    declaration.tabbed ? tr(STR_DIR_DOWN_OR_TAB) : tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, hints.front.btn1, hints.front.btn2, hints.front.btn3, hints.front.btn4);
   GUI.drawSideButtonHints(renderer, hints.side.up, hints.side.down);
 }

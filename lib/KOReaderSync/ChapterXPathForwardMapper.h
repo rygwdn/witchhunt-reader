@@ -8,7 +8,6 @@
 namespace ChapterXPathIndexerInternal {
 
 std::string findXPathForProgressInternal(const std::shared_ptr<Epub>& epub, int spineIndex, float intraSpineProgress);
-
 // The XPath of the text at `visibleOffset` (VisibleText.h's count from the chapter's start), named
 // to the codepoint as /text()[N].M in a block element or inside inline elements
 // (/p[K]/span[1]/text()[N].M); stray text in table rows by its element. An offset before an image

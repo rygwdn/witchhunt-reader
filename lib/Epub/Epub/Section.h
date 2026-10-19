@@ -410,6 +410,22 @@ class Section {
   // unavailable or empty.
   std::optional<uint16_t> getPageForVisibleTextOffset(uint32_t offset) const;
 
+  struct CachedPageInfo {
+    uint16_t pageCount = 0;
+    std::optional<uint32_t> visibleTextOffset;
+    uint16_t paragraphIndex = 0;
+    uint16_t listItemIndex = 0;
+  };
+
+  // Look up a page using the most recently written complete section variant, without needing the
+  // caller to reconstruct the reader's full BuildParams. Used only when migrating legacy
+  // bookmarks that stored a page but no stable XHTML position.
+  static bool getCachedPageInfoFromAnyLayout(const std::string& bookCachePath, int spineIndex, uint16_t page,
+                                             CachedPageInfo& out);
+  // Resolve a stable paragraph/list-item index against the most recently written page LUT.
+  static std::optional<uint16_t> getPageForIndexFromAnyLayout(const std::string& bookCachePath, int spineIndex,
+                                                              uint16_t index, bool isListItem);
+
  private:
   // Allocates buildState_ and runs Setup. Applies the low-heap embedded-CSS downgrade.
   // requestedHash is the property hash of the params as requested by the caller (before

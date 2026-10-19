@@ -28,6 +28,8 @@ truncates the file in place.
 | `sleep_frame.bin` | `saveSleepFrameBuffer` (`src/main.cpp`) | none | The framebuffer kept for Quick Resume; deleted once read |
 | `content-changed` | `HalStorage` | none | Empty marker: [below](#content-changed) |
 | `library/library.bin` | `LibraryPublish` | `library::VERSION` (3) | The Library's book index: [below](#librarybin) |
+| `bookorbit/catalog.bin` | `BookOrbitCatalogStore` | `VERSION` (4) | Account-scoped dashboard and remote catalog snapshot, separate from local files: [below](#bookorbitcatalogbin) |
+| `bookorbit/<account-md5>.json` | `BookOrbitCatalogSettings` | JSON schema | Catalog format/scope preferences, keyed by base URL and username |
 | `fileindex/<hash>.idx` | `FileIndex` | `INDEX_VERSION` (2) | A large folder's sorted listing, magic `CPFI`; `<hash>` is FNV-1a 64 of the folder's path |
 | `fonts/<Family>/<Family>_<size>.cpfont` | Font Manager, web upload | `CPFONT_VERSION` (4) in `lib/EpdFont/SdCardFont.cpp` | SD fonts; one of another version is refused. Downloads are staged in `<Family>__staging/` and swapped in. See [contributing/font-cache-structures.md](contributing/font-cache-structures.md) |
 | `fontprev/*.fpv` | `FontPreviewCache::store` | `FORMAT_VERSION` (2) | Rendered font previews, magic `CPFP` |
@@ -204,7 +206,7 @@ if (parsedSize != fileSize) {
 
 One file per spine item and per set of render settings: `spines/<spine / 32>/<spine>_<hash>.bin` in the book's cache directory, `<hash>` being the render settings' property hash in eight hex digits (`Section::getSectionFilePath`, `Epub::spineCacheDir`; 32 is `Epub::SPINE_CACHE_BUCKET_SIZE`). Up to five variants per spine item are kept; past that the oldest by modification date go (`Section::evictOldVariants`). Written and read by `lib/Epub/Epub/Section.cpp`. `SECTION_FILE_VERSION` at the top of that file is bumped on every layout change, so read it there; a number quoted here would go stale within weeks. A file with another version is rejected and rebuilt.
 
-The property hash (`Section::calculatePropertyHash`) covers the header's render settings, font-size normalisation, the inline-footnote-preview setting and, when previews are on, `INLINE_FOOTNOTE_PREVIEW_LAYOUT_VERSION` (3): a change in how previews expand rebuilds only the sections that show them.
+The property hash (`Section::calculatePropertyHash`) covers the header's render settings, font-size normalisation, the minimum-text-size setting, the font ladder's rung IDs and size ratios, the inline-footnote-preview setting and, when previews are on, `INLINE_FOOTNOTE_PREVIEW_LAYOUT_VERSION` (3): a change in how previews expand rebuilds only the sections that show them. The pre-rebase cleanup invalidates layouts made with the removed optional-hyphen cap and custom `.cpfont` drop-cap selection; it retains ordinary widow/orphan and consecutive-heading protection until the upstream pagination cutover.
 
 The file is, in order:
 
@@ -543,3 +545,101 @@ produces; a power cut leaves at worst bytes nothing references.
 Version 1 held one family: four style blocks, and a size table of bare ppems with pairs keyed by style alone.
 Version 2 had the mode in the `Geometry`, the store's, and a table map in each `StyleInfo` (1,240 B headers).
 An older header reads as not installed, so the first load installs the set over it.
+
+## `bookorbit/catalog.bin`
+
+BookOrbit Library opens cached Continue reading, Discover, New, Books and Browse tabs. Navigation,
+pagination and search all read the same snapshot, whether Wi-Fi is connected or not. **Refresh**
+explicitly rebuilds the configured catalog and shelves together, yielding between pages; cancellation
+retains the published snapshot. Settings → System → KOReader Sync → **BookOrbit catalog** offers **Readable formats only** (default Yes) and
+**Catalog scope** (**All books** or **Selected sources**). Libraries, collections and smart scopes
+can be selected together, up to 32 sources. Their books form a union deduplicated by book ID; selecting
+no sources produces an empty catalog rather than falling back to all books.
+
+Readable formats are EPUB, XTC, XTCH, TXT and MD, matched case-insensitively as complete format tokens.
+A book with any readable format is included even if it also has unsupported files. The snapshot
+request sends those formats as a union, so filtering happens on the server before pagination.
+Selected scope sends all chosen library, collection and smart-scope IDs in one request; unselected
+membership edges are ignored locally. Authors, series and local search are derived from the included
+book union. Snapshot shelves use that same union; reading-state synchronization remains independent.
+
+Preferences are stored per base URL and username in `bookorbit/<account-md5>.json`; the embedded account
+identity is also validated. Settings changes apply only on the next explicit refresh, leaving the
+current snapshot usable meanwhile. Source discovery streams to a temporary SD file and reads a
+20-candidate window; selected/stale sources stay visible and removable. Preference writes use staged
+publication with backup recovery. A malformed preference file refuses a refresh rather than widening
+the scope.
+
+`lib/BookOrbitCatalog/BookOrbitCatalogStore.cpp` streams `plugin/catalog/snapshot` pages into
+`catalog.tmp`, with at most one parsed book resident. The request binds scope, format filters and
+selected source IDs; subsequent pages reuse the same query with the opaque `nextCursor`. Each page
+must report version 1 and the same generation, ETag and total, with exactly the expected number of
+books. Duplicate book IDs, a stalled cursor, missing selected memberships, incomplete JSON or a
+failed callback refuse publication. Refresh does not fall back to the legacy listings/dashboard APIs.
+
+Canonical book IDs and source descriptor/directory offsets are indexed on SD. Source memberships
+produce local browsing rows; root navigation is synthesized with translated section labels.
+Some metadata is duplicated across source views. Source metadata arriving after books is supported;
+repeated metadata is validated against its indexed row. Shelf ordering comes from the same frozen
+response, with at most five Continue reading and twelve Discover IDs. Shelf records contain ID/group
+references, not another copy of each book's metadata; display resolves the canonical row.
+
+This is a full snapshot refresh, not a delta or conditional-ETag refresh. It needs neither a background
+worker nor PSRAM and has no local-library 2,000-book limit. The former independent
+`bookorbit_dashboard.dat` cache and its staged/backup files are removed on library entry and never read.
+
+The single published file contains a 24-byte header, raw account identity bytes, then interleaved
+variable-length descriptor and row records. Unlike this document's general `String` convention,
+these records carry their own `u16` byte lengths; strings have no terminator or fixed-width padding.
+
+| Record | Fixed bytes | Fields |
+|---|---:|---|
+| Header | 24 | `u32` magic `0x424F4341`; `u16` version and header size; `u32` descriptor and row counts; `u16` base-URL and username lengths; `i32` canonical book total |
+| Descriptor | 28 | `u32` magic `0x44455343`; `u8` kind (1), complete, listing-kind (0 normal, 1 all-books, 2 source-books), reserved; `u16` URL length; 2 alignment bytes; `i32` raw server total and page; `u32` next/previous descriptor indices (`UINT32_MAX` means absent); followed by the URL bytes |
+| Row | 36 | `u32` magic `0x524F5721`; `u8` kind (2), entry type, dashboard group, cover presence, row role (0 listing, 1 canonical book, 2 shelf reference); 3 reserved bytes; `u32` owning descriptor index; `i32` book ID and count; `i16` progress; five `u16` field lengths; followed by title, subtitle/authors, href, series and format bytes |
+
+Shelf references belong to the root descriptor and have zero field lengths. Their positive book ID
+must resolve to an earlier canonical row; their group must be Continue Reading or Discover.
+
+URLs are at most 512 bytes and each row field at most 511 bytes. An oversized field, failed request,
+incomplete book page, frozen-generation mismatch or failed write refuses replacement rather than
+silently publishing a partial library. Snapshot requests use 100-book pages; the final page has the
+remaining books, and an empty catalog still has one page. Source and canonical local listings page
+the complete published rows independently of the server cursor.
+
+Descriptor identity and page-family comparisons ignore query-parameter ordering. Local source
+URLs retain the existing `books?libraryId=...&sort=title&size=100` shape, but are never fetched during
+snapshot ingestion. Source counts are derived from stored membership rows.
+
+BookOrbit diagnostics use the `BOCat` log tag. HTTP 200 only confirms transport success: streamed
+JSON parsing, raw pagination validation and local snapshot writes can still fail. Failure logs
+record the stage, received HTTP status, parser/body result and relevant counts, without response
+bodies, credentials or request URLs. Library entry records whether it uses the saved dashboard
+or builds a catalog. Activity error boundaries flush disk logs immediately when disk logging is
+enabled, so one failed opening does not need another 16 log lines to reach `/debug.log.txt`.
+
+Publication uses `catalog.bak`: the staged file is flushed, closed and structurally validated before
+replacement; the published file is validated before removing the backup. An interrupted publication
+recovers the valid live file or backup. A failed snapshot fetch leaves the entire previous
+published snapshot intact; catalog and shelf membership cannot publish independently.
+Base URL and username must match the configured KOReader account before a snapshot is used.
+
+Books in this file need not exist locally. Availability is checked against readable local copies;
+the remote snapshot never inserts phantom files into `library/library.bin`. Offline book details
+show cached browsing metadata and a remote-only notice. Descriptions, download-file lists and
+status/rating actions require connectivity; Download connects for full details before using the
+normal transfer flow. Covers and pending reading-state changes remain outside this replaceable file.
+
+`bookorbit/catalog.ids` is a disposable version-2 derived index, rebuilt when missing or incompatible.
+Its header records snapshot size, full-file FNV-1a fingerprint, row and canonical counts, account
+identity, hash-table capacity and page-family count offset/count. Sixteen-byte slots contain an
+`i32` book ID, reserved `u32`, and canonical-row `u64` offset. Each family count has an eight-byte
+header (`u16` URL length, reserved `u16`, `u32` count), followed by its normalized URL bytes.
+The authoritative `catalog.bin` remains version 4 with its unchanged 24-byte header; older page-size
+URLs retain their identity until an explicit refresh replaces the snapshot.
+
+Only the current listing's offsets and availability flags are indexed in RAM (at most 102 rows,
+510 bytes of vector payload). Shelf indices are bounded to 20 rows. The activity materializes either
+view into one temporary session file, not a second durable data store. Local search uses one reusable
+512-byte field buffer and only canonical union rows, avoiding duplicate results from overlapping
+sources, views or shelf references. Browsing never falls back to server listings.

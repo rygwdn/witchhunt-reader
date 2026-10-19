@@ -8,6 +8,7 @@
 
 #include "CrossPointSettings.h"
 #include "KOReaderAuthActivity.h"
+#include "BookOrbitCatalogSettingsActivity.h"
 #include "KOReaderCredentialStore.h"
 #include "MappedInputManager.h"
 #include "activities/reader/KOReaderAutoSync.h"
@@ -38,7 +39,7 @@ KOReaderSettingsActivity::KOReaderSettingsActivity(GfxRenderer& renderer, Mapped
 }
 
 void KOReaderSettingsActivity::buildMenuItems() {
-  menuItems.reserve(14);
+  menuItems.reserve(15);
   // Username, Password, Server URL: ACTION items with custom value display
   menuItems.push_back(SettingInfo::Action(StrId::STR_SYNC_SERVER_URL, SettingAction::None)
                           .withSubcategory(StrId::STR_MENU_KOSYNC_SERVER));
@@ -74,6 +75,9 @@ void KOReaderSettingsActivity::buildMenuItems() {
   }
 
   buildAutoSyncItems();
+  if (KOREADER_STORE.getCatalogCapable()) {
+    menuItems.push_back(SettingInfo::Action(StrId::STR_BOOKORBIT_CATALOG_SETTINGS, SettingAction::None));
+  }
 
   // Authenticate and Register: ACTION items
   menuItems.push_back(
@@ -201,6 +205,10 @@ void KOReaderSettingsActivity::onActionSelected(int index) {
     startActivityForResult(
         std::make_unique<KOReaderAuthActivity>(renderer, mappedInput, KOReaderAuthActivity::Mode::REGISTER),
         [](const ActivityResult&) {});
+  } else if (item.nameId == StrId::STR_BOOKORBIT_CATALOG_SETTINGS) {
+    if (!KOREADER_STORE.getCatalogCapable()) return;
+    startActivityForResult(std::make_unique<BookOrbitCatalogSettingsActivity>(renderer, mappedInput),
+                           [](const ActivityResult&) {});
   }
 }
 

@@ -21,6 +21,7 @@
 
 #include "HalI2cBus.h"
 #include "HalSpiBus.h"
+#include "StagedFileReplace.h"
 
 #define SDCard SDCardManager::getInstance()
 
@@ -447,6 +448,23 @@ bool HalStorage::rename(const char* oldPath, const char* newPath) {
   noteContentChange(oldPath);
   noteContentChange(newPath);
   HAL_STORAGE_WRAPPED_CALL(rename, oldPath, newPath);
+}
+
+namespace {
+
+bool stagedReplaceExists(void* context, const char* path) {
+  return static_cast<HalStorage*>(context)->exists(path);
+}
+
+bool stagedReplaceRename(void* context, const char* oldPath, const char* newPath) {
+  return static_cast<HalStorage*>(context)->rename(oldPath, newPath);
+}
+
+}  // namespace
+
+bool HalStorage::publishStagedFileWithBackup(const char* tempPath, const char* livePath, const char* backupPath) {
+  const StagedFileReplace::Operations operations{this, stagedReplaceExists, stagedReplaceRename};
+  return StagedFileReplace::publish(operations, tempPath, livePath, backupPath);
 }
 
 bool HalStorage::rmdir(const char* path) {

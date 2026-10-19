@@ -105,6 +105,10 @@ brings its own -- and built again only for a reason (`LibraryStaleness::rebuildN
   anything and the power may go first). The first such change after the mark leaves a marker file,
   `/.crosspoint/content-changed`; a build that finishes with no change since it started removes it
   (`HalStorage::markContentSeen`). The servers end with a restart, which the marker survives.
+  When this marker is present, the browser also resolves every indexed author's metadata again,
+  retaining `firstSeen`. This covers a BookOrbit replacement with the same filename and byte count:
+  its identity is unchanged, but its newly invalidated `details.bin` may now name a different author.
+  Unchanged books reuse `details.bin`; they do not require another EPUB parse.
 - **A change the firmware did not see**: a card edited in a computer's card reader. When the Books tab
   lists a book or folder dated later than the header's `newestDate` -- the newest book or folder the
   walk saw -- it is not in the index, and is counted as a change (`LibraryFreshness::checkListedEntry`,

@@ -34,6 +34,7 @@ class KOReaderCredentialStore {
   std::string serverUrl;                                            // Custom sync server URL (empty = default)
   DocumentMatchMethod matchMethod = DocumentMatchMethod::FILENAME;  // Default to filename for compatibility
   bool sendMetadata = false;
+  bool catalogCapable = false;
   // New installs get the one-tap flow. An existing koreader.json that predates this key is
   // migrated to ASK_EVERY_TIME on load, so nobody's sync silently changes behaviour.
   KOReaderSyncBehavior syncBehavior = KOReaderSyncBehavior::SMART;
@@ -92,6 +93,13 @@ class KOReaderCredentialStore {
   // Send document metadata (filename, title, authors) with progress uploads
   void setSendMetadata(bool value);
   bool getSendMetadata() const { return sendMetadata; }
+
+  // True when the configured server answered the BookOrbit catalog capability probe.
+  // Cached so the home screen can offer the library without a network round-trip;
+  // cleared whenever the credentials or the server URL change, because the verdict
+  // belongs to one server+account pair.
+  void setCatalogCapable(bool value);
+  bool getCatalogCapable() const { return catalogCapable; }
 
   // How the compare flow resolves a local/remote difference
   void setSyncBehavior(KOReaderSyncBehavior behavior);

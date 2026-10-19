@@ -63,6 +63,8 @@ class AutoSyncState {
 };
 
 #define AUTOSYNC_STATE AutoSyncState::getInstance()
+struct KOReaderSyncJob;
+
 
 class KOReaderAutoSync {
  public:
@@ -82,13 +84,17 @@ class KOReaderAutoSync {
   static bool sleepPushEnabled();
   static bool intervalPushEnabled();
 
-  static uint64_t pushSilentAsync(const std::string& epubPath, const KOReaderPosition& localKoPos, int spine, int page,
-                                  const std::string& title = "", const std::string& authors = "");
-
+  static KOReaderSyncJob makeSilentPushJob(const std::string& epubPath, const KOReaderPosition& localKoPos, int spine,
+                                           int page, const std::string& title = "",
+                                           const std::string& authors = "", const std::string& bookOrbitHash = "");
+  static bool automaticAttemptAllowed();
+  static void resetRetryPolicy();
+  static void recordAutomaticResult(const KOReaderSyncJob& job);
+  static uint64_t pushSilentAsync(KOReaderSyncJob&& job);
+  static bool finalizeSilentPush(const KOReaderSyncJob& job);
   static bool finalizeSilentPush(uint64_t seq);
 
-  static bool stashSleepPush(const std::string& epubPath, const KOReaderPosition& localKoPos, int spine, int page,
-                             const std::string& title = "", const std::string& authors = "");
+  static bool stashSleepPush(KOReaderSyncJob&& job);
   static uint64_t pushStashedSleepPushAsync();
   static bool sleepPushPending(uint64_t seq);
   static void joinStashedSleepPush(uint64_t seq);

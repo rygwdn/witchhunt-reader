@@ -49,6 +49,11 @@ set(PIPELINE_SOURCES
   ${REPO_ROOT}/lib/FsHelpers/SidecarFiles.cpp
   ${REPO_ROOT}/lib/CooperativeAbort/CooperativeAbort.cpp
   ${REPO_ROOT}/lib/Utf8/Utf8.cpp
+  ${REPO_ROOT}/lib/KOReaderSync/ChapterXPathIndexerInternal.cpp
+  ${REPO_ROOT}/lib/KOReaderSync/ChapterXPathForwardMapper.cpp
+  ${REPO_ROOT}/lib/KOReaderSync/ChapterXPathReverseMapper.cpp
+  ${REPO_ROOT}/lib/KOReaderSync/ChapterXPathIndexer.cpp
+  ${REPO_ROOT}/lib/KOReaderSync/ProgressMapper.cpp
   ${REPO_ROOT}/lib/GfxRenderer/Bitmap.cpp
   ${REPO_ROOT}/lib/GfxRenderer/GfxScratchBuffer.cpp
   ${REPO_ROOT}/lib/GfxRenderer/BitmapHelpers.cpp
@@ -63,6 +68,7 @@ set(PIPELINE_SOURCES
 set(PIPELINE_INCLUDES
   # Our stubs must shadow the real device headers: GfxRenderer.h, HalDisplay.h,
   # I18n.h, esp_*.h.
+  ${REPO_ROOT}/test/bookorbit_bookmark_sync
   ${CMAKE_CURRENT_SOURCE_DIR}
   # Real stdio-backed FsFile/Storage (shadows test/shims/HalStorage.h).
   ${REPO_ROOT}/test/zip_entry_reader
@@ -70,14 +76,18 @@ set(PIPELINE_INCLUDES
   ${REPO_ROOT}/test/shims
   ${REPO_ROOT}
   ${REPO_ROOT}/lib
+  ${REPO_ROOT}/src
   ${REPO_ROOT}/lib/Epub
   ${REPO_ROOT}/lib/EpdFont
+  ${REPO_ROOT}/lib/KOReaderSync
+  ${REPO_ROOT}/lib/BookOrbitCatalog
   # For Bitmap.h/BitmapHelpers.h only — our stub dir precedes this, so the
   # real GfxRenderer.h in the same directory stays shadowed.
   ${REPO_ROOT}/lib/GfxRenderer
   ${REPO_ROOT}/lib/Logging
   ${REPO_ROOT}/lib/Memory
   ${REPO_ROOT}/lib/Serialization
+  ${REPO_ROOT}/lib/hal
   ${REPO_ROOT}/lib/Utf8
   ${REPO_ROOT}/lib/ZipFile
   ${REPO_ROOT}/lib/InflateReader
@@ -106,6 +116,10 @@ add_executable(EpubPipelineTest
   StreamedParseTest.cpp
   FootnotePreviewStoreTest.cpp
   FootnoteResolveSliceTest.cpp
+  BookOrbitBookmarkSyncTest.cpp
+  ${REPO_ROOT}/src/BookOrbitBookmarkSync.cpp
+  ${REPO_ROOT}/lib/hal/StagedFileReplace.cpp
+  ${REPO_ROOT}/src/GlobalBookmarkIndex.cpp
   ParagraphAnchorTest.cpp
   ParsedTextOffsetTest.cpp
   LowHeapLoadTest.cpp

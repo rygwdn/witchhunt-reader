@@ -57,5 +57,20 @@ binary id ..."). The learned choice lands in
 /.crosspoint/epub_<hash>/koreader_syncmethod.txt on the SD card; delete that
 file to re-run the experiment from scratch.
 
+The BookOrbit Library (lib/BookOrbitCatalog) has the same shape of problem and
+the same answer: its listing parser is host-tested (test/bookorbit_catalog),
+and scripts/bookorbit_mock_server.py serves the whole catalog the device speaks
+-- capability probe, root/section/book listings, search, JPEG thumbnails,
+read-status and rating PUTs, file downloads -- plus the kosync endpoints, so
+one Authenticate both syncs and lights up the Home screen's library row:
+
+  python scripts/bookorbit_mock_server.py --host 0.0.0.0 --port 8080
+  # device: Settings -> System -> KOReader Sync -> Sync Server URL
+  #         http://<your-lan-ip>:8080   (any username/password is accepted)
+
+The in-memory library includes a book whose description overflows the listing
+parser's 512-byte token buffer and a book with no cover, so both edges can be
+seen from the device. Every request is logged.
+
 The mapping table in the conformance runner is a hand transcription of
 KOReaderSyncClient.cpp; there is no automatic link, so change both together.

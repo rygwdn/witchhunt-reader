@@ -43,6 +43,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <utility>
 
 #include "BookRelocation.h"
 #include "CrossPointSettings.h"
@@ -55,8 +56,10 @@
 #include "EpubReaderPrintedPageInputActivity.h"
 #include "FinishedBookActivity.h"
 #include "GlobalBookmarkIndex.h"
-#include "KOReaderCredentialStore.h"
 #include "KOReaderDocumentId.h"
+#include "BookOrbitBookmarkSync.h"
+#include "KOReaderCredentialStore.h"
+
 #include "MappedInputManager.h"
 #include "PreRenderGate.h"
 #include "QrDisplayActivity.h"
@@ -623,6 +626,15 @@ uint8_t epubProgressPercentByte(const Epub& epub, const int spineIndex, const in
   return ReaderUtils::fractionProgressPercentByte(epub.calculateProgress(spineIndex, chapterProgress));
 }
 
+uint32_t bookOrbitLocationTick(const Epub& epub, const int spineIndex, const int currentPage, int pageCount) {
+  if (pageCount <= 0) return 0;
+  const float chapterProgress = static_cast<float>(currentPage) / static_cast<float>(pageCount);
+  const float bookProgress = epub.calculateProgress(spineIndex, chapterProgress);
+  if (!(bookProgress > 0.0f)) return 0;  // Includes a non-finite result.
+  if (bookProgress >= 1.0f) return ReadingSessionTracker::BOOKORBIT_LOCATION_TICKS;
+  return static_cast<uint32_t>(bookProgress * ReadingSessionTracker::BOOKORBIT_LOCATION_TICKS);
+}
+
 int clampPercent(int percent) {
   if (percent < 0) {
     return 0;
@@ -834,15 +846,24 @@ void EpubReaderActivity::onEnter() {
   // book opens -- more resampling there, never a wrong glyph.
   renderer.ensureScaledGlyphCache(getEffectiveReaderFontId());
   logReaderMemSnapshot("onEnter_after_glyph_cache");
-
-  // Start a reading-stats session. We use the cheap filename-based hash here:
-  // computing the content hash would re-read the file on every reader open,
-  // and a renamed book getting a new stats entry is acceptable — it'll still
-  // accumulate going forward. A device test's book is no history (SerialTestApi::isTestBook).
+  bookOrbitHash_.clear();
+  if (!SerialTestApi::isTestBook(epub->getPath()) && KOREADER_STORE.hasCredentials() &&
+      KOREADER_STORE.getCatalogCapable()) {
+    // BookOrbit resolves events against its content partial-MD5 fileHash. Keep
+    // this identity separate from progress.bin's filename-based local stats id.
+    bookOrbitHash_ = KOReaderDocumentId::calculate(epub->getPath());
+  }
+  const int initialPageCount =
+      section ? (section->hasActiveBuild() ? section->estimatedTotalPages() : section->pageCount) : 0;
+  const uint32_t initialBookLocation =
+      epub && section && initialPageCount > 0
+          ? bookOrbitLocationTick(*epub, currentSpineIndex, section->currentPage, initialPageCount)
+          : 0;
   if (const std::string& bookPath = epub->getPath(); !SerialTestApi::isTestBook(bookPath)) {
     globalReadingSessionTracker().begin(KOReaderDocumentId::calculateFromFilename(bookPath), epub->getTitle(),
-                                        epub->getAuthor());
+                                        epub->getAuthor(), bookOrbitHash_, initialBookLocation);
   }
+
   // Bookmarks + recent-books overrides + the stats session. These are the loads a wake
   // shortcut would most plausibly skip or cache in RTC, so they get their own bucket.
   WakeTrace::mark(WakeTrace::Phase::StoresLoaded);
@@ -1598,11 +1619,10 @@ void EpubReaderActivity::releasePsramBuildScratch(Section* holder) {
 }
 
 void EpubReaderActivity::resetBackgroundBuild() {
-  endBackgroundBorrow();  // returns the lent buffer (and aborts the build) if B held it
-  // Only when B still owns it: after the buildSection() adoption the arena belongs to C and its
-  // build is live inside it, and resetBackgroundBuild() runs on exactly that path.
+  endBackgroundBorrow();  // returns the lent buffer and tears down a live borrowed-arena build
+  // Detaching this caller-owned arena now aborts any live build before the block is released.
   if (backgroundPsramScratchActive_) releasePsramBuildScratch(backgroundSection_.get());
-  backgroundSection_.reset();  // ~Section aborts a partial build and deletes its partial file
+  backgroundSection_.reset();
   backgroundBuildSpineIndex_ = -1;
   backgroundBuildNeedsResolve_ = false;
   backgroundBuildGateCheckMs_ = 0;
@@ -1614,8 +1634,8 @@ void EpubReaderActivity::resetBackgroundBuild() {
 }
 
 bool EpubReaderActivity::beginBackgroundBorrow() {
-  if (backgroundBorrowActive_ || secondaryBorrowed_ || !backgroundSection_) {
-    return false;  // already lent (to B or to C) — never two arenas over one region
+  if (backgroundBorrowActive_ || backgroundPsramScratchActive_ || secondaryBorrowed_ || !backgroundSection_) {
+    return false;  // already lent to Background-B/C — never two arenas over one region
   }
 #if defined(BOARD_HAS_PSRAM) && BOARD_HAS_PSRAM
   // Preferred on PSRAM boards: build out of external RAM and leave the framebuffer alone. The
@@ -2958,10 +2978,24 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
       break;
     }
     case EpubReaderMenuActivity::MenuAction::STAR_PAGE: {
+      int spineIndex = -1;
+      int page = -1;
+      int pageCount = 0;
       {
         RenderLock lock(*this);
         if (section && section->currentPage >= 0 && section->currentPage < section->pageCount) {
-          bookmarkStore.toggle(static_cast<uint16_t>(currentSpineIndex), static_cast<uint16_t>(section->currentPage));
+          spineIndex = currentSpineIndex;
+          page = section->currentPage;
+          pageCount = section->pageCount;
+        }
+      }
+      if (spineIndex >= 0) {
+        std::string positionMetadata =
+            BookOrbitBookmarkSync::makeLocalPositionMetadata(epub, spineIndex, page, pageCount);
+        RenderLock lock(*this);
+        if (section && currentSpineIndex == spineIndex && section->currentPage == page) {
+          bookmarkStore.toggle(static_cast<uint16_t>(spineIndex), static_cast<uint16_t>(page),
+                               std::move(positionMetadata));
           requestUpdate();
         }
       }
@@ -2971,15 +3005,33 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
       startActivityForResult(
           std::make_unique<StarredPagesActivity>(renderer, mappedInput, bookmarkStore, epub),
           [this](const ActivityResult& result) {
-            if (!result.isCancelled) {
-              const auto& starred = std::get<StarredPageResult>(result.data);
-              RenderLock lock(*this);
-              if (currentSpineIndex != starred.spineIndex || !section || section->currentPage != starred.pageNumber) {
-                currentSpineIndex = starred.spineIndex;
-                navTarget = NavigationTarget::makePage(starred.pageNumber);
-                section.reset();
+            if (result.isCancelled) return;
+            const auto& starred = std::get<StarredPageResult>(result.data);
+            int spineIndex = starred.spineIndex;
+            uint16_t localPage = starred.pageNumber;
+            NavigationTarget target = NavigationTarget::makePage(localPage);
+            if (!starred.xpointer.empty()) {
+              float intraSpineProgress = 0.0f;
+              int exactSpine = -1;
+              uint16_t paragraphIndex = 0;
+              uint16_t listItemIndex = 0;
+              if (BookOrbitBookmarkSync::resolvePositionForNavigation(
+                      epub, epub->getCachePath(), starred.xpointer, exactSpine, intraSpineProgress, localPage,
+                      &paragraphIndex, &listItemIndex)) {
+                spineIndex = exactSpine;
+                if (listItemIndex != 0) {
+                  target = NavigationTarget::makeListItem(listItemIndex, localPage);
+                } else if (paragraphIndex != 0) {
+                  target = NavigationTarget::makeParagraph(paragraphIndex, localPage);
+                } else {
+                  target = NavigationTarget::makePercent(intraSpineProgress);
+                }
               }
             }
+            RenderLock lock(*this);
+            currentSpineIndex = spineIndex;
+            navTarget = std::move(target);
+            section.reset();
           });
       break;
     }
@@ -3103,18 +3155,41 @@ void EpubReaderActivity::applyPendingBookmarkJump() {
   if (!jump.active || !epub || jump.bookPath != epub->getPath()) {
     return;
   }
-  LOG_DBG("ERS", "Applying pending bookmark jump: spine=%u page=%u", jump.spineIndex, jump.pageNumber);
-  if (jump.spineIndex >= static_cast<uint16_t>(epub->getSpineItemsCount())) {
-    LOG_ERR("ERS", "Invalid bookmark jump spine index %u, resetting to 0", jump.spineIndex);
-    jump.spineIndex = 0;
-    jump.pageNumber = 0;
+  int spineIndex = jump.spineIndex;
+  uint16_t localPage = jump.pageNumber;
+  NavigationTarget target = NavigationTarget::makePage(localPage);
+  if (!jump.xpointer.empty()) {
+    float intraSpineProgress = 0.0f;
+    int exactSpine = -1;
+    uint16_t paragraphIndex = 0;
+    uint16_t listItemIndex = 0;
+    if (BookOrbitBookmarkSync::resolvePositionForNavigation(
+            epub, epub->getCachePath(), jump.xpointer, exactSpine, intraSpineProgress, localPage, &paragraphIndex,
+            &listItemIndex)) {
+      spineIndex = exactSpine;
+      if (listItemIndex != 0) {
+        target = NavigationTarget::makeListItem(listItemIndex, localPage);
+      } else if (paragraphIndex != 0) {
+        target = NavigationTarget::makeParagraph(paragraphIndex, localPage);
+      } else {
+        target = NavigationTarget::makePercent(intraSpineProgress);
+      }
+    } else {
+      LOG_ERR("ERS", "Bookmark XPointer no longer resolves exactly; using its stored local page hint");
+    }
+  }
+  if (spineIndex < 0 || spineIndex >= epub->getSpineItemsCount()) {
+    LOG_ERR("ERS", "Invalid bookmark jump spine index %d, resetting to 0", spineIndex);
+    spineIndex = 0;
+    localPage = 0;
+    target = NavigationTarget::makePage(0);
   }
   // Seed live state directly; the persistent write is for crash recovery only.
   // saveProgress() on the next render overwrites with the real percent.
-  currentSpineIndex = jump.spineIndex;
-  navTarget = NavigationTarget::makePage(jump.pageNumber);
-  navTarget.cachedSpineIdx = jump.spineIndex;
-  if (!writeReaderProgressCache(epub->getCachePath(), jump.spineIndex, jump.pageNumber, 0, 0)) {
+  currentSpineIndex = spineIndex;
+  navTarget = std::move(target);
+  navTarget.cachedSpineIdx = spineIndex;
+  if (!writeReaderProgressCache(epub->getCachePath(), spineIndex, localPage, 0, 0)) {
     LOG_ERR("ERS", "Failed to persist bookmark jump to progress.bin; live state still seeded");
   }
   jump.clear();
@@ -3916,7 +3991,13 @@ void EpubReaderActivity::pageTurn(bool isForwardTurn) {
     preRenderedPage.ready = false;
     usePreRenderedBuffer = true;
     sessionPagesAdvanced++;
-    globalReadingSessionTracker().onPageTurn();
+    const int pageCount = section ? (section->hasActiveBuild() ? section->estimatedTotalPages() : section->pageCount) : 0;
+    if (epub && section && pageCount > 0) {
+      globalReadingSessionTracker().onBookPageTurn(
+          bookOrbitLocationTick(*epub, currentSpineIndex, section->currentPage, pageCount));
+    } else {
+      globalReadingSessionTracker().onBookPageTurn();
+    }
     lastPageTurnTime = millis();
     requestUpdate();
     return;
@@ -3935,7 +4016,13 @@ void EpubReaderActivity::pageTurn(bool isForwardTurn) {
   logPageTurnWindowIfReady();
 
   sessionPagesAdvanced++;
-  globalReadingSessionTracker().onPageTurn();
+  const int pageCount = section ? (section->hasActiveBuild() ? section->estimatedTotalPages() : section->pageCount) : 0;
+  if (epub && section && pageCount > 0) {
+    globalReadingSessionTracker().onBookPageTurn(
+        bookOrbitLocationTick(*epub, currentSpineIndex, section->currentPage, pageCount));
+  } else {
+    globalReadingSessionTracker().onBookPageTurn();
+  }
   // Page state advanced without using a pre-render. Drop any pre-render that was
   // scheduled for the page we just left: otherwise the coalesced render() would
   // classify as a PreRender pass and try to pre-render the *new* current page's

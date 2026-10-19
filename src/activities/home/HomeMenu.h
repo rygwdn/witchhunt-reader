@@ -15,6 +15,7 @@ enum class HomeMenuAction : uint8_t {
   Library,
   ReadingStats,
   GlobalBookmarks,
+  BookOrbitLibrary,
   FileTransfer,
   Weather,
   More,
@@ -27,10 +28,11 @@ struct HomeMenuEntry {
   UIIcon icon;
 };
 
-// What exists right now. An entry with nothing behind it (no bookmarks) is left out of both
-// lists: the per-item settings choose where an entry goes, not whether it exists.
+// What exists right now. Entries with nothing behind them (no bookmarks or BookOrbit catalog) are
+// left out of both lists: per-item settings choose their placement, not their availability.
 struct HomeMenuAvailability {
   bool hasBookmarks = false;
+  bool hasBookOrbitLibrary = false;
 };
 
 enum class HomeMenuPlacement : uint8_t { Home, More };

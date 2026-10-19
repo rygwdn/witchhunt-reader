@@ -8,6 +8,11 @@ Everything since 2.37. Your books have one Library screen, with tabs for Recent,
 
 ### Library
 
+- **BookOrbit Refresh uses one server-frozen catalog.** Books, source memberships and Continue reading/Discover shelves arrive together through the snapshot API, instead of separate source listings and dashboard requests. Readable formats and selected-source unions are filtered on the server; an incomplete refresh leaves the previous offline catalog intact. Requires a BookOrbit server with the catalog snapshot endpoint.
+- **Fix: opening BookOrbit and starting Refresh could restart the reader.** Refresh cleanup now closes only open cache handles, including early-failure and cancellation paths.
+
+- **BookOrbit downloads use the shared local Library index and metadata cache.** A moved download can still open from BookOrbit after the local index is refreshed, without another downloaded-book database. Redownloads refresh local metadata, including same-size replacements. The offline remote dashboard, covers and BookOrbit sync state remain available.
+
 - **One Library screen, with four tabs: Books, Recent, New and Authors.** Browse Files and Recent Books are now its first two tabs, and Home has a single **Library** entry, which opens on the tab you left. Hold **Up** or **Down** to change tab (their hints read "Up / Tab" and "Down / Tab"), or tap a tab on a touch screen. Each tab keeps your place while the Library is open, and closing a book returns to the tab, the folder or author, and the row you opened it from.
 - **New lists the ten books added to the card most recently, and Authors everyone who wrote a book on it.** Authors are listed surname first ("Pratchett, Terry"), each with the number of their books; open one to see their books by series and then title. The author comes from an `.opf` metadata file beside the book if there is one, and its sort name decides where the author is filed; without one, the last word of the name comes first. Both tabs read an index of the card's books that is kept on the card and brought up to date when the card changes: books added or removed on the device, through the web interface, Calibre, an OPDS catalogue or USB Drive are noticed by themselves, and **Refresh library** in the options menu picks up anything copied in a computer's card reader that the Library missed. A book that has never been opened is read once for its author, so the first visit takes a while on a large card; the header shows **Indexing** while it runs. Up to 2,000 books are indexed.
 - **Three ways to show books: Filenames, Details and Covers**, chosen with **Book view** in the options menu, separately for each tab. **Details** shows each book's title, with the author and series under it ("Thomas Mann · Werke #3") and how far you have read: a percentage, or **Finished**. **Covers** shows a grid of whole covers with the title and author under each, a bar along the bottom of a book you are reading and a folded corner on one you have finished. A folder is drawn as a folder, with the number of books in it and in the folders below it. In the grid, Up/Down move a row and Left/Right one cover, wrapping round at the ends; hold **Right** for the options menu. A cover not made yet shows a card with the title first; the covers on screen are then made one at a time, and a button press pauses the work. The Books tab starts on Filenames, Recent and New on Covers, and Authors on Details.
@@ -209,11 +214,31 @@ Where the code here is someone else's, it is credited in the source file it live
 - **Home's Browse files and Recent books switches become one Library switch**, on if either of them was on, and Home's OPDS Browser entry moves into File Transfer.
 - **Font sizes are now stored in points.** Your sizes are converted on the first start and kept. If you go back to an older firmware, it resets a size of 9 pt or more to the default, and reads a smaller one as a different size.
 - **Catalan, Spanish and Vietnamese gained a few labels** from crosspoint-reader before the full translation, and German's message for a chapter with no content now reads "Leeres Kapitel" instead of "Kapitelende" ("end of chapter").
+
 ### BookOrbit library
 
+- **BookOrbit now uses tabs instead of a cover dashboard.** Continue reading, Discover, New (when available), Books, and Browse use the shared Library list controls. Browse supports drilldown; each tab retains its own navigation position. Offline entry, search, book details, downloads, status, and rating actions remain available.
+- **BookOrbit refresh logs show where the time goes.** Info-level summaries separate catalog generation stages, offline view loading, and cover download/conversion, with counts and elapsed time on failures. Trace builds add per-listing-page ingestion and finalization timings.
+- **BookOrbit refresh requests 100 books per page and avoids duplicate all-books traversal.** Derived on-card book-ID and page-family indexes avoid repeated full-catalog scans; local download indicators are resolved in batches.
+- **Refresh yields between catalog pages and preserves the previous snapshot on cancellation.** Missing shelf covers load after the refreshed views are ready, with valid cached artwork reused.
 - **Authenticated cover downloads now write to their staging file before publication.** Failed transfers preserve the existing destination instead of removing it prematurely.
+- **Book details retain grayscale covers and portrait/landscape layouts.**
+  Detail thumbnails use book-shaped crop bounds; older narrow crops are replaced without discarding the offline copy.
+- **Failed cover refreshes preserve previously cached artwork.** New covers replace the cache
+  only after conversion and validation succeed.
+- **Catalog refreshes preserve a usable offline cache.** Empty or invalid responses do not
+  replace it, and cached views are accepted only for the matching server and account.
+
 ### Reading and sync
 
+- **Automatic KOReader Sync backs off when Wi-Fi or the server is unavailable.** Consecutive
+  failures delay the next eligible automatic attempt by 1, 2, 4, 8, 16, then at most 30 minutes.
+  Reading pushes, wake pulls, and sleep pushes share the cooldown, which survives normal deep
+  sleep; no retry timer wakes the device or starts Wi-Fi. Reading retries still require a page
+  turn, and a blocked wake pull waits for a later resume. Pending progress is kept locally.
+  Authentication and non-retryable HTTP client errors suspend automatic attempts until account,
+  server, or Wi-Fi credentials change, or manual sync succeeds. Manual sync bypasses the cooldown;
+  cancellation and local deferrals do not increase it. A cold power-on resets the retry policy.
 - **Automatic KOReader Sync leaves the reading page responsive.** While a background sync is
   active, the reader pauses next-page and next-chapter preparation, including image warming, but
   keeps visible rendering and work on the current chapter available.
@@ -222,6 +247,17 @@ Where the code here is someone else's, it is credited in the source file it live
   behavior is unchanged.
 - **The sleep screen shows the busy indicator while a KoSync sleep push is active**, then redraws
   the configured sleep screen when the sleep sync wait ends.
+- **EPUB reading sessions sync to BookOrbit.** The reader queues real page-turn time locally and
+  sends it when the signed-in BookOrbit server supports reading statistics. Books the catalogue
+  cannot match remain queued for a later retry. Interrupted journal replacement preserves a
+  recoverable queue, and capped idle gaps no longer carry fractional time into later activity.
+- **Starred EPUB bookmarks sync with BookOrbit servers.** Manual and enabled background KOReader
+  sync send and receive stars through the same account; opening a received bookmark resolves its
+  structural EPUB position into this device's layout rather than trusting the server's page
+  number. Older stars migrate from saved local chapter layouts, and unresolved positions do not
+  trigger deletions of other server bookmarks.
+- **BookOrbit state refreshes with KOReader sync.** The active book's content hash resolves its catalog entry; queued local status and rating changes are reconciled, and the canonical status, rating and review note are cached. Book details display cached review notes as paged, read-only text. Unmatched or incomplete responses leave queued changes intact, server **Completed** and **Abandoned** statuses are preserved when a book opens, and cleared ratings or reviews update the cache and library immediately.
+  Explicit catalog choices still use direct writes, so later same-day choices apply; queued date keys use UTC to match the server's conflict dates.
 - **Automatic KOReader interval pushes finish in the reader.** Completed uploads are finalized
   before another sync starts, and page turns made while an upload is in flight still count toward
   the next interval.
@@ -526,6 +562,7 @@ Everything since 2.26. Two new devices, touch control throughout, and a long run
 ### Library, menus and transfer
 
 - **Settings and the reader menu are now tabbed** — Navigation, Settings, Sync and Tools in a book; Display, Reader, Controls and System outside it — instead of one long list. The design is adapted from **CrossInk** by uxjulia.
+- **New: BookOrbit Library.** If the KOReader sync server is a BookOrbit server, the Home screen gains a **BookOrbit Library** entry — a native browser for the collection behind it. Its cover dashboard has Continue reading, Discover and Browse sections, opens from an account-scoped SD cache without connecting, and refreshes only when asked. It tracks downloads at the configured OPDS download path and opens them directly from dashboard covers, listings or the responsive book overview. Browse by library, collection, author or series, search, set reading status and rating, and download any stored format under the same account as sync. A plain kosync server never shows the row. See the user guide, §3.7.8.
 - **Fix: one press in the file browser ran two handlers.** Confirm entered a folder and then immediately opened the first thing in it; Back always left the browser however deep you were, because the short-press "up one folder" branch could never be reached.
 - Fix: picking a firmware file from a folder with 64 or more files in it listed the books next to them, and picking one handed an EPUB over as firmware.
 - Fix: a submenu could contain itself. Fix: a settings row did not repaint after being toggled. Fix: taps on weather search results did nothing.

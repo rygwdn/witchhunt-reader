@@ -1839,7 +1839,9 @@ void FileBrowserActivity::refreshLibrary() {
 
 void FileBrowserActivity::startLibraryBuild(const bool resolveAll) {
   LibraryBuilder::Config config;
-  config.resolveAll = resolveAll;
+  // Same-name, same-size redownloads keep their identity and firstSeen, but may have
+  // different metadata. Unchanged books resolve cheaply through details.bin.
+  config.resolveAll = resolveAll || Storage.contentChangedSinceMark();
   config.showHidden = SETTINGS.showHiddenFiles;
   config.isBook = &FileBrowserModel::isBookName;
   config.resolve = &resolveAuthor;

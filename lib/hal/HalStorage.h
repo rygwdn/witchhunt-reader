@@ -87,6 +87,9 @@ class HalStorage {
   bool exists(const char* path);
   bool remove(const char* path);
   bool rename(const char* oldPath, const char* newPath);
+  // The caller holds its store mutex and has recovered backupPath. tempPath must already be
+  // flushed, closed, and validated. Success leaves backupPath for caller validation and cleanup.
+  bool publishStagedFileWithBackup(const char* tempPath, const char* livePath, const char* backupPath);
   bool rmdir(const char* path);
   // Whether two paths name one file or folder. FAT compares names without case, so
   // "/Books/a.epub" and "/books/A.EPUB" are the same file, which comparing the strings misses.

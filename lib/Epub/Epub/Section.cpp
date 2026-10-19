@@ -2621,6 +2621,157 @@ std::optional<std::string> Section::getPrintedPageLabelFromCache(const std::stri
   return std::string("(") + labelsOnPage.front() + "/" + labelsOnPage.back() + ")";
 }
 
+namespace {
+std::string newestCompleteSectionCachePath(const std::string& bookCachePath, const int spineIndex) {
+  if (spineIndex < 0) return {};
+  const std::string bucketDir = Epub::spineCacheDir(bookCachePath, spineIndex);
+  char prefix[16];
+  snprintf(prefix, sizeof(prefix), "%d_", spineIndex);
+  const size_t prefixLength = strlen(prefix);
+  char newestName[40] = {};
+  uint16_t newestDate = 0;
+  uint16_t newestTime = 0;
+
+  FsFile dir = Storage.open(bucketDir.c_str());
+  if (!dir || !dir.isDirectory()) return {};
+  char name[40];
+  for (FsFile file = dir.openNextFile(); file; file = dir.openNextFile()) {
+    file.getName(name, sizeof(name));
+    const size_t length = strlen(name);
+    const bool matchingName =
+        length == prefixLength + 12 && strncmp(name, prefix, prefixLength) == 0 &&
+        strcmp(name + prefixLength + 8, ".bin") == 0;
+    uint8_t version = 0;
+    uint8_t status = 0;
+    uint16_t pageCount = 0;
+    const bool completeCache =
+        matchingName && file.seek(header::kVersion) &&
+        file.read(reinterpret_cast<uint8_t*>(&version), sizeof(version)) == sizeof(version) &&
+        version == SECTION_FILE_VERSION && file.seek(header::kParseComplete) &&
+        file.read(reinterpret_cast<uint8_t*>(&status), sizeof(status)) == sizeof(status) &&
+        (status & kStatusParseComplete) != 0 && file.seek(header::kPageCount) &&
+        file.read(reinterpret_cast<uint8_t*>(&pageCount), sizeof(pageCount)) == sizeof(pageCount) && pageCount > 0 &&
+        pageCount <= 10000;
+    if (completeCache) {
+      uint16_t modifiedDate = 0;
+      uint16_t modifiedTime = 0;
+      file.getModifyDateTime(&modifiedDate, &modifiedTime);
+      if (newestName[0] == '\0' || modifiedDate > newestDate ||
+          (modifiedDate == newestDate && modifiedTime > newestTime)) {
+        snprintf(newestName, sizeof(newestName), "%s", name);
+        newestDate = modifiedDate;
+        newestTime = modifiedTime;
+      }
+    }
+    file.close();
+  }
+  dir.close();
+  return newestName[0] == '\0' ? std::string() : bucketDir + "/" + newestName;
+}
+
+bool readCachedSectionHeader(FsFile& file, uint16_t& pageCount, uint32_t& paragraphLutOffset) {
+  uint8_t version = 0;
+  uint8_t status = 0;
+  return file.seek(header::kVersion) &&
+         file.read(reinterpret_cast<uint8_t*>(&version), sizeof(version)) == sizeof(version) &&
+         version == SECTION_FILE_VERSION && file.seek(header::kParseComplete) &&
+         file.read(reinterpret_cast<uint8_t*>(&status), sizeof(status)) == sizeof(status) &&
+         (status & kStatusParseComplete) != 0 && file.seek(header::kPageCount) &&
+         file.read(reinterpret_cast<uint8_t*>(&pageCount), sizeof(pageCount)) == sizeof(pageCount) && pageCount > 0 &&
+         pageCount <= 10000 && file.seek(header::kParagraphLut) &&
+         file.read(reinterpret_cast<uint8_t*>(&paragraphLutOffset), sizeof(paragraphLutOffset)) ==
+             sizeof(paragraphLutOffset);
+}
+}  // namespace
+
+bool Section::getCachedPageInfoFromAnyLayout(const std::string& bookCachePath, const int spineIndex,
+                                             const uint16_t page, CachedPageInfo& out) {
+  const std::string cachePath = newestCompleteSectionCachePath(bookCachePath, spineIndex);
+  if (cachePath.empty()) return false;
+  FsFile file;
+  if (!Storage.openFileForRead("SCT", cachePath, file)) return false;
+
+  uint32_t paragraphLutOffset = 0;
+  if (!readCachedSectionHeader(file, out.pageCount, paragraphLutOffset) || page >= out.pageCount) {
+    file.close();
+    return false;
+  }
+  out.visibleTextOffset.reset();
+  out.paragraphIndex = 0;
+  out.listItemIndex = 0;
+  if (paragraphLutOffset == 0 || paragraphLutOffset > file.size() - sizeof(uint16_t)) {
+    file.close();
+    return true;
+  }
+
+  uint16_t count = 0;
+  file.seek(paragraphLutOffset);
+  if (file.read(reinterpret_cast<uint8_t*>(&count), sizeof(count)) != sizeof(count) || page >= count) {
+    file.close();
+    return true;
+  }
+  const uint64_t entryOffset = static_cast<uint64_t>(paragraphLutOffset) + sizeof(uint16_t) +
+                              static_cast<uint64_t>(page) * PARAGRAPH_LUT_ENTRY_SIZE;
+  uint32_t visibleTextOffset = 0;
+  if (entryOffset + PARAGRAPH_LUT_ENTRY_SIZE > file.size() || !file.seek(static_cast<uint32_t>(entryOffset)) ||
+      file.read(reinterpret_cast<uint8_t*>(&visibleTextOffset), sizeof(visibleTextOffset)) !=
+          sizeof(visibleTextOffset) ||
+      file.read(reinterpret_cast<uint8_t*>(&out.paragraphIndex), sizeof(out.paragraphIndex)) !=
+          sizeof(out.paragraphIndex) ||
+      file.read(reinterpret_cast<uint8_t*>(&out.listItemIndex), sizeof(out.listItemIndex)) !=
+          sizeof(out.listItemIndex)) {
+    out.visibleTextOffset.reset();
+    out.paragraphIndex = 0;
+    out.listItemIndex = 0;
+  } else {
+    out.visibleTextOffset = visibleTextOffset;
+  }
+  file.close();
+  return true;
+}
+
+std::optional<uint16_t> Section::getPageForIndexFromAnyLayout(const std::string& bookCachePath, const int spineIndex,
+                                                              const uint16_t index, const bool isListItem) {
+  if (index == 0) return std::nullopt;
+  const std::string cachePath = newestCompleteSectionCachePath(bookCachePath, spineIndex);
+  if (cachePath.empty()) return std::nullopt;
+  FsFile file;
+  if (!Storage.openFileForRead("SCT", cachePath, file)) return std::nullopt;
+
+  uint16_t pageCount = 0;
+  uint32_t paragraphLutOffset = 0;
+  if (!readCachedSectionHeader(file, pageCount, paragraphLutOffset) || paragraphLutOffset == 0 ||
+      paragraphLutOffset > file.size() - sizeof(uint16_t)) {
+    file.close();
+    return std::nullopt;
+  }
+
+  uint16_t count = 0;
+  file.seek(paragraphLutOffset);
+  if (file.read(reinterpret_cast<uint8_t*>(&count), sizeof(count)) != sizeof(count) || count == 0 ||
+      count > pageCount) {
+    file.close();
+    return std::nullopt;
+  }
+  for (uint16_t page = 0; page < count; ++page) {
+    const uint64_t entryOffset = static_cast<uint64_t>(paragraphLutOffset) + sizeof(uint16_t) +
+                                static_cast<uint64_t>(page) * PARAGRAPH_LUT_ENTRY_SIZE +
+                                sizeof(uint32_t) + (isListItem ? sizeof(uint16_t) : 0);
+    uint16_t pageIndex = 0;
+    if (entryOffset + sizeof(pageIndex) > file.size() || !file.seek(static_cast<uint32_t>(entryOffset)) ||
+        file.read(reinterpret_cast<uint8_t*>(&pageIndex), sizeof(pageIndex)) != sizeof(pageIndex)) {
+      file.close();
+      return std::nullopt;
+    }
+    if (pageIndex >= index) {
+      file.close();
+      return page;
+    }
+  }
+  file.close();
+  return static_cast<uint16_t>(count - 1);
+}
+
 std::optional<std::string> Section::getNearestPrintedPageLabelAtOrBefore(uint16_t page) const {
   // pageBreakLabels is built in document order (i.e. ascending pageIndex), so the last
   // entry whose page is <= `page` is the "you're currently reading at or after this

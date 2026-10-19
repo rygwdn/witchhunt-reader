@@ -174,6 +174,7 @@ class ActivityManager {
   void goToBrowser();
   // The same, searching `query` on arrival: a finished book's "more by this author". Back goes Home.
   void goToBrowserWithSearch(std::string query);
+  void goToBookOrbitLibrary();
   void goToReader(std::string path);
   void goToKOReaderSync();
   // fromTimeout=true marks this as an auto-sleep (used to gate Quick Resume on Timeout).

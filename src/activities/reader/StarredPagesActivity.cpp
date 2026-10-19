@@ -7,20 +7,36 @@
 #include "activities/util/KeyboardEntryActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "BookOrbitBookmarkSync.h"
 
 std::string StarredPagesActivity::getDefaultLabel(int index) const {
   const auto& bm = bookmarkStore.getAll()[index];
+  const bool hasLocalPage = bm.pageNumber != BookmarkStore::UNKNOWN_PAGE_NUMBER;
   char buf[64];
   if (epub) {
     const int tocIndex = epub->getTocIndexForSpineIndex(bm.spineIndex);
     if (tocIndex != -1) {
       const auto tocItem = epub->getTocItem(tocIndex);
-      return tocItem.title + " - " + tr(STR_PAGE_PREFIX) + std::to_string(bm.pageNumber + 1);
+      std::string label = tocItem.title;
+      if (hasLocalPage) {
+        label += " - ";
+        label += tr(STR_PAGE_PREFIX);
+        label += std::to_string(bm.pageNumber + 1);
+      }
+      return label;
     }
-    snprintf(buf, sizeof(buf), "%s%d, %s%d", tr(STR_SECTION_PREFIX), bm.spineIndex + 1, tr(STR_PAGE_PREFIX),
-             bm.pageNumber + 1);
+    if (hasLocalPage) {
+      snprintf(buf, sizeof(buf), "%s%d, %s%d", tr(STR_SECTION_PREFIX), bm.spineIndex + 1,
+               tr(STR_PAGE_PREFIX), bm.pageNumber + 1);
+    } else {
+      snprintf(buf, sizeof(buf), "%s%d", tr(STR_SECTION_PREFIX), bm.spineIndex + 1);
+    }
   } else {
-    snprintf(buf, sizeof(buf), "%s%d", tr(STR_PAGE_PREFIX), bm.pageNumber + 1);
+    if (hasLocalPage) {
+      snprintf(buf, sizeof(buf), "%s%d", tr(STR_PAGE_PREFIX), bm.pageNumber + 1);
+    } else {
+      snprintf(buf, sizeof(buf), "%s", tr(STR_STARRED_PAGES));
+    }
   }
   return std::string(buf);
 }
@@ -91,7 +107,13 @@ void StarredPagesActivity::loop() {
     if (totalItems > 0 && ev.button == MappedInputManager::Button::Confirm &&
         ev.type == ButtonEventManager::PressType::Short) {
       const auto& bm = bookmarkStore.getAll()[selectorIndex];
-      setResult(StarredPageResult{bm.spineIndex, bm.pageNumber});
+      std::string xpointer;
+      BookOrbitBookmarkSync::PositionMetadataView metadata;
+      if (epub && BookOrbitBookmarkSync::decodePositionMetadata(bm.syncMetadata, metadata)) {
+        xpointer.assign(metadata.position);
+      }
+      const uint16_t localPage = bm.pageNumber == BookmarkStore::UNKNOWN_PAGE_NUMBER ? 0 : bm.pageNumber;
+      setResult(StarredPageResult{bm.spineIndex, localPage, std::move(xpointer)});
       finish();
       return;
     }

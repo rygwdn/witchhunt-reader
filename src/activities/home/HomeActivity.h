@@ -26,12 +26,14 @@ struct RecentBook;
 struct Rect;
 
 class HomeActivity final : public Activity {
+
   ButtonNavigator buttonNavigator;
   int selectorIndex = 0;
   int lastCarouselBookIndex = 0;  // remembered position when leaving carousel row
   bool recentsLoading = false;
   bool recentsLoaded = false;
   bool firstRenderDone = false;
+  bool hasBookOrbitLibrary = false;
   bool coverRendered = false;
   bool coverBufferStored = false;
   // True while the ~52 KB secondary framebuffer is LENT to the cold-cache cover pipeline as

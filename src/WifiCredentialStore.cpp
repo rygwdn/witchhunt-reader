@@ -5,6 +5,7 @@
 #include <Logging.h>
 #include <ObfuscationUtils.h>
 
+#include "activities/reader/KOReaderAutoSync.h"
 #include <cstring>
 
 // Initialize the static instance
@@ -40,7 +41,11 @@ bool WifiCredentialStore::addCredential(const std::string& ssid, const std::stri
   const auto cred = find_if(credentials.begin(), credentials.end(),
                             [&ssid](const WifiCredential& cred) { return cred.ssid == ssid; });
   if (cred != credentials.end()) {
+    const bool changed = cred->password != password;
     cred->password = password;
+#if CROSSPOINT_KOREADER_AUTOSYNC
+    if (changed) KOReaderAutoSync::resetRetryPolicy();
+#endif
     LOG_DBG("WCS", "Updated credentials for: %s", ssid.c_str());
     return saveToFile();
   }
@@ -53,6 +58,9 @@ bool WifiCredentialStore::addCredential(const std::string& ssid, const std::stri
 
   // Add new credential
   credentials.push_back({ssid, password});
+#if CROSSPOINT_KOREADER_AUTOSYNC
+  KOReaderAutoSync::resetRetryPolicy();
+#endif
   LOG_DBG("WCS", "Added credentials for: %s", ssid.c_str());
   return saveToFile();
 }
@@ -62,6 +70,9 @@ bool WifiCredentialStore::removeCredential(const std::string& ssid) {
                             [&ssid](const WifiCredential& cred) { return cred.ssid == ssid; });
   if (cred != credentials.end()) {
     credentials.erase(cred);
+#if CROSSPOINT_KOREADER_AUTOSYNC
+    KOReaderAutoSync::resetRetryPolicy();
+#endif
     LOG_DBG("WCS", "Removed credentials for: %s", ssid.c_str());
     if (ssid == lastConnectedSsid) {
       clearLastConnectedSsid();
@@ -177,9 +188,13 @@ void WifiCredentialStore::setLastKnownMacAddress(const std::string& mac) {
 const std::string& WifiCredentialStore::getLastKnownMacAddress() const { return lastKnownMacAddress; }
 
 void WifiCredentialStore::clearAll() {
+  const bool hadCredentials = !credentials.empty();
   credentials.clear();
   lastConnectedSsid.clear();
   lastKnownMacAddress.clear();
+#if CROSSPOINT_KOREADER_AUTOSYNC
+  if (hadCredentials) KOReaderAutoSync::resetRetryPolicy();
+#endif
   saveToFile();
   LOG_DBG("WCS", "Cleared all WiFi credentials");
 }

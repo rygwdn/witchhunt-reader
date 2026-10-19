@@ -7,6 +7,7 @@
 
 #include "../../src/JsonSettingsIO.h"
 #include "../../src/util/UrlUtils.h"
+#include "../../src/activities/reader/KOReaderAutoSync.h"
 
 // Initialize the static instance
 KOReaderCredentialStore KOReaderCredentialStore::instance;
@@ -42,8 +43,14 @@ bool KOReaderCredentialStore::loadFromFile() {
 }
 
 void KOReaderCredentialStore::setCredentials(const std::string& user, const std::string& pass) {
+  const bool changed = username != user || password != pass;
   username = user;
   password = pass;
+  // A changed account invalidates the cached server capability verdict.
+  catalogCapable = false;
+#if CROSSPOINT_KOREADER_AUTOSYNC
+  if (changed) KOReaderAutoSync::resetRetryPolicy();
+#endif
   LOG_DBG("KRS", "Set credentials for user: %s", user.c_str());
 }
 
@@ -64,8 +71,13 @@ std::string KOReaderCredentialStore::getMd5Password() const {
 bool KOReaderCredentialStore::hasCredentials() const { return !username.empty() && !password.empty(); }
 
 void KOReaderCredentialStore::clearCredentials() {
+  const bool hadCredentials = !username.empty() || !password.empty();
   username.clear();
   password.clear();
+  catalogCapable = false;
+#if CROSSPOINT_KOREADER_AUTOSYNC
+  if (hadCredentials) KOReaderAutoSync::resetRetryPolicy();
+#endif
   saveToFile();
   LOG_DBG("KRS", "Cleared KOReader credentials");
 }
@@ -73,7 +85,14 @@ void KOReaderCredentialStore::clearCredentials() {
 void KOReaderCredentialStore::setServerUrl(const std::string& url) {
   // Repair a typo'd scheme here as well as in getBaseUrl(), so the settings
   // screen shows -- and the file keeps -- the URL that will actually be used.
-  serverUrl = UrlUtils::repairSchemeSeparator(url);
+  const std::string repairedUrl = UrlUtils::repairSchemeSeparator(url);
+  const bool changed = serverUrl != repairedUrl;
+  serverUrl = repairedUrl;
+  // A changed host invalidates the cached server capability verdict.
+  catalogCapable = false;
+#if CROSSPOINT_KOREADER_AUTOSYNC
+  if (changed) KOReaderAutoSync::resetRetryPolicy();
+#endif
   LOG_DBG("KRS", "Set server URL: %s", serverUrl.empty() ? "(default)" : serverUrl.c_str());
 }
 
@@ -111,6 +130,11 @@ void KOReaderCredentialStore::setMatchMethod(DocumentMatchMethod method) {
 void KOReaderCredentialStore::setSendMetadata(bool value) {
   sendMetadata = value;
   LOG_DBG("KRS", "Send metadata: %s", value ? "enabled" : "disabled");
+}
+
+void KOReaderCredentialStore::setCatalogCapable(bool value) {
+  catalogCapable = value;
+  LOG_DBG("KRS", "BookOrbit catalog: %s", value ? "available" : "unavailable");
 }
 
 void KOReaderCredentialStore::setSyncBehavior(KOReaderSyncBehavior behavior) {

@@ -40,12 +40,14 @@ struct PendingBookmarkJumpState {
   std::string bookPath;     // source file path for disambiguation
   uint16_t spineIndex = 0;  // EPUB spine; ignored for TXT
   uint16_t pageNumber = 0;  // page within spine (EPUB) or global page (TXT)
+  std::string xpointer;     // exact BookOrbit position; empty for local-only/TXT jumps
 
   void clear() {
     active = false;
     bookPath.clear();
     spineIndex = 0;
     pageNumber = 0;
+    xpointer.clear();
   }
 };
 

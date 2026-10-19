@@ -12,6 +12,7 @@
 #include <esp_wifi.h>
 
 #include <cmath>
+#include <cstddef>
 #include <new>
 
 #include "CrossPointSettings.h"
@@ -20,6 +21,7 @@
 #include "KOReaderDocumentId.h"
 #include "KOReaderSyncMetadata.h"
 #include "KOReaderSyncWorker.h"
+#include "BookOrbitBookStateSync.h"
 #include "MappedInputManager.h"
 #include "SilentRestart.h"
 #include "activities/NetworkMemoryTrim.h"
@@ -28,9 +30,14 @@
 #include "components/UITheme.h"
 #include "components/themes/ListTouchBand.h"
 #include "fontIds.h"
+#include "BookOrbitReadingStatsSync.h"
+#include <BookOrbitCatalogClient.h>
+#include "BookOrbitBookmarkSync.h"
+#include "BookmarkStore.h"
 
 namespace {
 constexpr time_t NTP_RESYNC_MIN_INTERVAL_SEC = 15 * 60;
+constexpr size_t MAX_BOOKMARK_SYNC_ROUNDS = 256;
 
 // Our last push of the book, beside its progress.bin (LastPushCache.h).
 constexpr const char* LAST_PUSH_FILE = "/kosync_push.bin";
@@ -126,6 +133,19 @@ void KOReaderSyncActivity::onWifiSelectionComplete(const bool success) {
   logSyncMemSnapshot("before_performSync");
   trimMemoryForNetworkSession(renderer, "KOSync");
   logSyncMemSnapshot("after_trim_before_performSync");
+  if (KOREADER_STORE.hasCredentials() && KOREADER_STORE.getCatalogCapable() && !epubPath.empty()) {
+    const std::string bookOrbitHash = KOReaderDocumentId::calculate(epubPath);
+    if (!bookOrbitHash.empty()) {
+      BookOrbitBookStateResult result;
+      const auto stateError = BookOrbitBookStateSync::syncActiveHash(bookOrbitHash, result);
+      if (stateError != BookOrbitCatalogClient::OK) {
+        LOG_INF("KOSync", "Active BookOrbit state refresh failed (%s)",
+                BookOrbitCatalogClient::errorString(stateError));
+      }
+    }
+  }
+  BookOrbitReadingStatsSync::drain();
+  BookOrbitBookStateSync::drain();
 
   performSync();
 
@@ -265,6 +285,102 @@ bool KOReaderSyncActivity::probeAlternateDocumentId(const bool havePrimaryRecord
   return true;
 }
 
+void KOReaderSyncActivity::syncBookmarks() {
+  if (bookmarkSyncAttempted || !KOREADER_STORE.hasCredentials() || !KOREADER_STORE.getCatalogCapable()) return;
+  bookmarkSyncAttempted = true;
+
+  const std::string hash = KOReaderDocumentId::calculate(epubPath);
+  if (hash.size() != 32) {
+    LOG_ERR("KOSync", "Bookmark sync skipped: could not calculate the BookOrbit file hash");
+    return;
+  }
+
+  KOReaderSyncClient::endPersistentSession();
+  BookOrbitCatalogClient::setSkipTlsValidation(SETTINGS.skipHttpsValidation != 0);
+  if (!ensureEpubLoadedForMapping()) return;
+  epub->setupCacheDir();
+  BookmarkStore store;
+  store.load(epub->getCachePath());
+
+  size_t changeOffset = 0;
+  for (size_t round = 0; round < MAX_BOOKMARK_SYNC_ROUNDS; ++round) {
+    if (!ensureEpubLoadedForMapping()) return;
+
+    BookOrbitBookmarkExchangeBook book;
+    size_t totalChanges = 0;
+    uint32_t revision = 0;
+    if (!BookOrbitBookmarkSync::prepareExchange(store, epub, hash, changeOffset, book, totalChanges, revision)) {
+      LOG_ERR("KOSync", "Bookmark sync snapshot failed for %s", epubPath.c_str());
+      releaseEpubForMapping();
+      return;
+    }
+    const size_t sentChanges = book.changes.size();
+    BookOrbitBookmarkExchangeRequest request;
+    request.books.push_back(std::move(book));
+    releaseEpubForMapping();
+
+    BookOrbitBookmarkExchangeResponse response;
+    BookOrbitCatalogClient::beginPersistentSession();
+    const auto exchangeResult = BookOrbitCatalogClient::exchangeBookmarks(request, response);
+    BookOrbitCatalogClient::endPersistentSession();
+    if (exchangeResult != BookOrbitCatalogClient::OK) {
+      LOG_ERR("KOSync", "Bookmark exchange failed (%s)", BookOrbitCatalogClient::errorString(exchangeResult));
+      return;
+    }
+
+    if (response.results.empty()) {
+      if (response.unmatched.size() == 1 && response.unmatched.front() == hash) {
+        LOG_DBG("KOSync", "BookOrbit has no matching catalog entry for bookmark hash %s", hash.c_str());
+        return;
+      }
+      LOG_ERR("KOSync", "Bookmark exchange returned no result for %s", hash.c_str());
+      return;
+    }
+    if (response.results.size() != 1 || response.results.front().hash != hash) {
+      LOG_ERR("KOSync", "Bookmark exchange returned an unexpected book result");
+      return;
+    }
+
+    if (!ensureEpubLoadedForMapping()) return;
+    BookOrbitBookmarkSync::ApplyResult applied;
+    if (!BookOrbitBookmarkSync::applyResponse(store, epub, epubPath, epub->getCachePath(), epub->getTitle(), revision,
+                                               response.results.front(), applied)) {
+      LOG_ERR("KOSync", "Bookmark response could not be durably applied for %s", epubPath.c_str());
+      releaseEpubForMapping();
+      return;
+    }
+    releaseEpubForMapping();
+
+    const bool acknowledgmentNeeded = !applied.ack.applied.empty() || !applied.ack.deleted.empty();
+    if (acknowledgmentNeeded) {
+      BookOrbitBookmarkAckRequest acknowledgment;
+      acknowledgment.books.push_back(std::move(applied.ack));
+      std::string acknowledgmentResponse;
+      BookOrbitCatalogClient::beginPersistentSession();
+      const auto ackResult = BookOrbitCatalogClient::acknowledgeBookmarks(acknowledgment, acknowledgmentResponse);
+      BookOrbitCatalogClient::endPersistentSession();
+      if (ackResult != BookOrbitCatalogClient::OK) {
+        LOG_ERR("KOSync", "Bookmark acknowledgment failed (%s)", BookOrbitCatalogClient::errorString(ackResult));
+        return;
+      }
+    }
+
+    changeOffset += sentChanges;
+    if (applied.positionFailure) {
+      LOG_ERR("KOSync", "Bookmark sync stopped because a remote position could not be mapped exactly");
+      return;
+    }
+    if (!response.results.front().more && changeOffset >= totalChanges) return;
+    if (sentChanges == 0 && !acknowledgmentNeeded && response.results.front().more) {
+      LOG_ERR("KOSync", "Bookmark sync stopped because the server made no progress");
+      return;
+    }
+    if (sentChanges == 0 && !response.results.front().more) return;
+  }
+
+  LOG_ERR("KOSync", "Bookmark sync stopped at the per-session batch limit");
+}
+
 bool KOReaderSyncActivity::handleAutoPushPreflight() {
   KOReaderSyncClient::beginPersistentSession();
   KOReaderProgress warmupProgress;
@@ -293,6 +409,7 @@ bool KOReaderSyncActivity::handleAutoPushPreflight() {
     requestUpdate(true);
     return false;
   }
+  syncBookmarks();
   // Auto-push must not overwrite progress that is already further along on the server, and has
   // nothing to add when the server already holds this page. Judged by spine and paragraph from
   // the record's XPath before its percentage: a KOReader chapter-start push reads as a higher
@@ -353,6 +470,15 @@ void KOReaderSyncActivity::performFetchAndCompare() {
     probeAlternateDocumentId(true);
   }
 
+#if CROSSPOINT_KOREADER_AUTOSYNC
+  if (result == KOReaderSyncClient::OK &&
+      syncIntent != KOReaderSyncIntentState::AUTO_PULL) {
+    KOReaderAutoSync::resetRetryPolicy();
+  }
+#endif
+  if (result == KOReaderSyncClient::OK || result == KOReaderSyncClient::NOT_FOUND) {
+    syncBookmarks();
+  }
   if (result == KOReaderSyncClient::NOT_FOUND) {
     if (syncIntent == KOReaderSyncIntentState::PULL_REMOTE) {
       // Pull intent must not silently fall back to upload when server has no
@@ -632,7 +758,7 @@ void KOReaderSyncActivity::performUpload() {
   }
 
   saveOwnLastPush();
-
+  syncBookmarks();
   // Drop the radio while user reads the success screen; full teardown happens at silent reboot.
   esp_wifi_stop();
   APP_STATE.koReaderSyncSession.outcome = KOReaderSyncOutcomeState::UPLOAD_COMPLETE;

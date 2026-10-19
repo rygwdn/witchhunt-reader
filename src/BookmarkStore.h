@@ -1,6 +1,7 @@
 #pragma once
 
 #include <HalStorage.h>
+#include "../lib/Memory/HeapFit.h"
 #include <Logging.h>
 
 #include <algorithm>
@@ -22,119 +23,123 @@ class BookmarkStore {
     bookmarks.clear();
     dirty = false;
 
-    FsFile f;
-    if (!Storage.openFileForRead("BKM", getFilePath(), f)) {
-      return;
+    const uint32_t legacyRevision = revisionValue + 1;
+    uint32_t loadedRevision = legacyRevision;
+    std::vector<Bookmark> loadedBookmarks;
+    loadSucceeded = false;
+    const bool recovered = recoverStoreFiles(&loadedBookmarks, &loadedRevision, legacyRevision);
+    if (recovered) {
+      bookmarks = std::move(loadedBookmarks);
+      revisionValue = loadedRevision;
+    } else {
+      revisionValue = legacyRevision;
     }
-
-    uint8_t version;
-    if (f.read(reinterpret_cast<uint8_t*>(&version), sizeof(version)) != sizeof(version) || version < 1 ||
-        version > FILE_VERSION) {
-      f.close();
-      return;
-    }
-
-    uint16_t count;
-    if (f.read(reinterpret_cast<uint8_t*>(&count), sizeof(count)) != sizeof(count) || count > MAX_BOOKMARKS) {
-      LOG_ERR("BKM", "Invalid bookmark count: %u", static_cast<unsigned>(count));
-      f.close();
-      return;
-    }
-
-    bookmarks.reserve(count);
-    for (uint16_t i = 0; i < count; i++) {
-      Bookmark bm;
-      if (f.read(reinterpret_cast<uint8_t*>(&bm.spineIndex), sizeof(bm.spineIndex)) != sizeof(bm.spineIndex) ||
-          f.read(reinterpret_cast<uint8_t*>(&bm.pageNumber), sizeof(bm.pageNumber)) != sizeof(bm.pageNumber)) {
-        LOG_ERR("BKM", "Truncated bookmarks file at entry %d", i);
-        bookmarks.clear();
-        f.close();
-        return;
-      }
-      if (version >= 2) {
-        uint16_t nameLen = 0;
-        if (f.read(reinterpret_cast<uint8_t*>(&nameLen), sizeof(nameLen)) != sizeof(nameLen) ||
-            nameLen > MAX_NAME_LENGTH) {
-          LOG_ERR("BKM", "Invalid bookmark name length at entry %d", i);
-          bookmarks.clear();
-          f.close();
-          return;
-        }
-        if (nameLen > 0) {
-          bm.name.resize(nameLen);
-          if (f.read(reinterpret_cast<uint8_t*>(&bm.name[0]), nameLen) != nameLen) {
-            LOG_ERR("BKM", "Truncated bookmark name at entry %d", i);
-            bookmarks.clear();
-            f.close();
-            return;
-          }
-        }
-      }
-      bookmarks.push_back(std::move(bm));
-    }
-
-    f.close();
-    LOG_DBG("BKM", "Loaded %d bookmarks", count);
+    loadSucceeded = recovered || storeFilesReady;
   }
 
   // Save bookmarks to SD card (only if changed).
-  void save() {
-    if (!dirty || basePath.empty()) {
-      return;
+  // Save bookmarks through a checked temporary file. A failed write never replaces the last
+  // durable store, which is required before a remote exchange may be acknowledged.
+  // Calls are serialized on the activity thread; the sync worker only receives value snapshots.
+  // Recovery runs before even a no-op save so a stale backup cannot violate publish's precondition.
+  bool save() {
+    if (!loadSucceeded) {
+      LOG_ERR("BKM", "Refusing to save after bookmark load failed");
+      return false;
     }
-
+    if (basePath.empty()) {
+      if (!dirty) return true;
+      LOG_ERR("BKM", "Cannot save bookmarks without a cache path");
+      return false;
+    }
+    recoverStoreFiles(nullptr, nullptr, revisionValue + 1);
+    if (!storeFilesReady) {
+      LOG_ERR("BKM", "Bookmark file recovery is incomplete; refusing to replace the durable store");
+      return false;
+    }
+    if (!dirty) return true;
     if (bookmarks.size() > MAX_BOOKMARKS) {
       LOG_ERR("BKM", "Too many bookmarks to save: %u", static_cast<unsigned>(bookmarks.size()));
-      return;
+      return false;
     }
 
+    const std::string path = getFilePath();
+    const std::string tempPath = path + ".tmp";
+    const std::string backupPath = path + ".bak";
+    if (Storage.exists(tempPath.c_str()) && !Storage.remove(tempPath.c_str())) {
+      LOG_ERR("BKM", "Failed to clear stale temporary bookmarks file");
+      return false;
+    }
     FsFile f;
-    if (!Storage.openFileForWrite("BKM", getFilePath(), f)) {
-      LOG_ERR("BKM", "Failed to save bookmarks");
-      return;
+    if (!Storage.openFileForWrite("BKM", tempPath, f)) {
+      LOG_ERR("BKM", "Failed to open temporary bookmarks file");
+      return false;
     }
 
     auto writePodChecked = [&f](const auto& value) {
       return f.write(reinterpret_cast<const uint8_t*>(&value), sizeof(value)) == sizeof(value);
     };
+    auto writeString = [&f](const std::string& value, const uint16_t limit) {
+      if (value.size() > limit) return false;
+      const uint16_t length = static_cast<uint16_t>(value.size());
+      return f.write(reinterpret_cast<const uint8_t*>(&length), sizeof(length)) == sizeof(length) &&
+             (length == 0 || f.write(reinterpret_cast<const uint8_t*>(value.data()), length) == length);
+    };
 
     const uint16_t count = static_cast<uint16_t>(bookmarks.size());
-    bool ok = writePodChecked(FILE_VERSION) && writePodChecked(count);
-
-    for (const auto& bm : bookmarks) {
-      const uint16_t nameLen = static_cast<uint16_t>(std::min<size_t>(bm.name.size(), MAX_NAME_LENGTH));
-      ok = ok && writePodChecked(bm.spineIndex) && writePodChecked(bm.pageNumber) && writePodChecked(nameLen);
-      if (ok && nameLen > 0) {
-        ok = f.write(reinterpret_cast<const uint8_t*>(bm.name.data()), nameLen) == nameLen;
-      }
+    bool ok = writePodChecked(FILE_VERSION) && writePodChecked(count) && writePodChecked(revisionValue);
+    for (const Bookmark& bm : bookmarks) {
+      ok = ok && writePodChecked(bm.spineIndex) && writePodChecked(bm.pageNumber) &&
+           writeString(bm.name, MAX_PERSISTED_NAME_BYTES) && writePodChecked(bm.remoteServerId) &&
+           writeString(bm.syncMetadata, MAX_SYNC_METADATA_LENGTH);
     }
-
-    if (ok) {
-      if (!f.close()) {
-        LOG_ERR("BKM", "Failed to close bookmarks file");
-        return;
-      }
-    } else {
+    if (!ok) {
       f.close();
+      Storage.remove(tempPath.c_str());
       LOG_ERR("BKM", "Failed while writing bookmarks");
-      return;
+      return false;
     }
+    if (!f.close() || !validateStoreFile(tempPath)) {
+      Storage.remove(tempPath.c_str());
+      LOG_ERR("BKM", "Temporary bookmarks file failed validation");
+      return false;
+    }
+    if (!Storage.publishStagedFileWithBackup(tempPath.c_str(), path.c_str(), backupPath.c_str())) {
+      LOG_ERR("BKM", "Failed to publish temporary bookmarks file");
+      return false;
+    }
+    if (!validateStoreFile(path)) {
+      storeFilesReady = false;
+      LOG_ERR("BKM", "Published bookmarks file failed validation; preserving backup");
+      return false;
+    }
+    Storage.remove(backupPath.c_str());
     dirty = false;
+    storeFilesReady = true;
     LOG_DBG("BKM", "Saved %d bookmarks", count);
+    return true;
   }
 
+
   // Toggle bookmark for the given page. Returns true if now starred, false if removed.
-  bool toggle(uint16_t spineIndex, uint16_t pageNumber) {
+  // Toggle a local bookmark. Optional packed metadata contains a stable exact
+  // structural position and device datetime generated by the reader.
+  bool toggle(uint16_t spineIndex, uint16_t pageNumber, std::string syncMetadata = {}) {
     auto it = find(spineIndex, pageNumber);
     if (it != bookmarks.end()) {
       bookmarks.erase(it);
       dirty = true;
+      ++revisionValue;
       return false;
     }
-    bookmarks.push_back({spineIndex, pageNumber});
+    Bookmark bookmark{spineIndex, pageNumber};
+    bookmark.syncMetadata = std::move(syncMetadata);
+    bookmarks.push_back(std::move(bookmark));
     dirty = true;
+    ++revisionValue;
     return true;
   }
+
 
   // Check if a page is starred.
   [[nodiscard]] bool has(uint16_t spineIndex, uint16_t pageNumber) const {
@@ -145,7 +150,66 @@ class BookmarkStore {
 
   [[nodiscard]] const std::vector<Bookmark>& getAll() const { return bookmarks; }
   [[nodiscard]] bool isEmpty() const { return bookmarks.empty(); }
-  void markDirty() { dirty = true; }
+  [[nodiscard]] uint32_t revision() const { return revisionValue; }
+  [[nodiscard]] bool isLoadValid() const { return loadSucceeded; }
+
+  bool applyRemoteAdd(Bookmark bookmark) {
+    if (bookmark.remoteServerId <= 0 || bookmark.name.size() > MAX_PERSISTED_NAME_BYTES) return false;
+    const auto existing = std::find_if(bookmarks.begin(), bookmarks.end(), [&bookmark](const Bookmark& item) {
+      return item.remoteServerId == bookmark.remoteServerId;
+    });
+    if (existing == bookmarks.end()) {
+      bookmarks.push_back(std::move(bookmark));
+    } else {
+      *existing = std::move(bookmark);
+    }
+    dirty = true;
+    ++revisionValue;
+    return true;
+  }
+
+  bool removeRemote(int32_t serverId) {
+    if (serverId <= 0) return false;
+    const auto existing = std::find_if(bookmarks.begin(), bookmarks.end(), [serverId](const Bookmark& item) {
+      return item.remoteServerId == serverId;
+    });
+    if (existing == bookmarks.end()) return true;
+    bookmarks.erase(existing);
+    dirty = true;
+    ++revisionValue;
+    return true;
+  }
+
+  bool setSyncMetadataAt(size_t index, std::string metadata) {
+    if (index >= bookmarks.size() || metadata.size() > MAX_SYNC_METADATA_LENGTH ||
+        bookmarks[index].syncMetadata == metadata) {
+      return false;
+    }
+    bookmarks[index].syncMetadata = std::move(metadata);
+    dirty = true;
+    ++revisionValue;
+    return true;
+  }
+
+  bool setRemoteServerIdAt(size_t index, int32_t serverId) {
+    if (index >= bookmarks.size() || serverId <= 0 || bookmarks[index].remoteServerId == serverId) return false;
+    bookmarks[index].remoteServerId = serverId;
+    dirty = true;
+    ++revisionValue;
+    return true;
+  }
+  bool setPageNumberAt(size_t index, uint16_t pageNumber) {
+    if (index >= bookmarks.size() || bookmarks[index].pageNumber == pageNumber) return false;
+    bookmarks[index].pageNumber = pageNumber;
+    dirty = true;
+    ++revisionValue;
+    return true;
+  }
+
+  void markDirty() {
+    dirty = true;
+    ++revisionValue;
+  }
 
   // Set or clear the name for the bookmark at index. Empty name reverts to default label.
   void rename(size_t index, std::string name) {
@@ -153,25 +217,202 @@ class BookmarkStore {
     if (name.size() > MAX_NAME_LENGTH) name.resize(MAX_NAME_LENGTH);
     bookmarks[index].name = std::move(name);
     dirty = true;
+    ++revisionValue;
   }
 
   void removeAt(size_t index) {
     if (index >= bookmarks.size()) return;
     bookmarks.erase(bookmarks.begin() + index);
     dirty = true;
+    ++revisionValue;
   }
 
-  static constexpr uint16_t MAX_NAME_LENGTH = 128;
 
+  // Local rename input remains short; remote titles may be 500 Unicode characters (2000 UTF-8 bytes).
+  static constexpr uint16_t MAX_NAME_LENGTH = 128;
+  static constexpr uint16_t MAX_PERSISTED_NAME_BYTES = 2000;
+  static constexpr uint16_t MAX_SYNC_METADATA_LENGTH = 4100;
+
+  static constexpr uint16_t UNKNOWN_PAGE_NUMBER = UINT16_MAX;
  private:
-  static constexpr uint8_t FILE_VERSION = 2;
+  static constexpr uint8_t FILE_VERSION = 4;
   static constexpr uint16_t MAX_BOOKMARKS = 1000;
 
   std::vector<Bookmark> bookmarks;
   std::string basePath;
   bool dirty = false;
+  uint32_t revisionValue = 0;
+  bool storeFilesReady = true;
+  bool loadSucceeded = true;
+
+  static bool skipString(FsFile& f, const uint16_t maxLength) {
+    uint16_t length = 0;
+    if (f.read(reinterpret_cast<uint8_t*>(&length), sizeof(length)) != sizeof(length) || length > maxLength) {
+      return false;
+    }
+    uint8_t discard[128];
+    size_t remaining = length;
+    while (remaining > 0) {
+      const size_t chunk = std::min(remaining, sizeof(discard));
+      if (f.read(discard, chunk) != static_cast<int>(chunk)) return false;
+      remaining -= chunk;
+    }
+    return true;
+  }
+
+  static bool validateStoreFile(const std::string& path) {
+    FsFile f;
+    if (!Storage.openFileForRead("BKM", path, f)) return false;
+    auto fail = [&f]() {
+      f.close();
+      return false;
+    };
+
+    uint8_t version = 0;
+    uint16_t count = 0;
+    if (f.read(reinterpret_cast<uint8_t*>(&version), sizeof(version)) != sizeof(version) || version < 1 ||
+        version > FILE_VERSION ||
+        f.read(reinterpret_cast<uint8_t*>(&count), sizeof(count)) != sizeof(count) || count > MAX_BOOKMARKS) {
+      return fail();
+    }
+    uint32_t persistedRevision = 0;
+    if (version >= 4 &&
+        f.read(reinterpret_cast<uint8_t*>(&persistedRevision), sizeof(persistedRevision)) != sizeof(persistedRevision)) {
+      return fail();
+    }
+
+    for (uint16_t i = 0; i < count; ++i) {
+      uint16_t spineIndex = 0;
+      uint16_t pageNumber = 0;
+      int32_t remoteServerId = -1;
+      if (f.read(reinterpret_cast<uint8_t*>(&spineIndex), sizeof(spineIndex)) != sizeof(spineIndex) ||
+          f.read(reinterpret_cast<uint8_t*>(&pageNumber), sizeof(pageNumber)) != sizeof(pageNumber) ||
+          (version >= 2 && !skipString(f, MAX_PERSISTED_NAME_BYTES)) ||
+          (version >= 3 &&
+           (f.read(reinterpret_cast<uint8_t*>(&remoteServerId), sizeof(remoteServerId)) != sizeof(remoteServerId) ||
+            !skipString(f, MAX_SYNC_METADATA_LENGTH)))) {
+        return fail();
+      }
+    }
+    return f.close();
+  }
+
+  static bool readStoreFile(const std::string& path, std::vector<Bookmark>& out, uint32_t& outRevision,
+                            const uint32_t legacyRevision) {
+    FsFile f;
+    if (!Storage.openFileForRead("BKM", path, f)) return false;
+    auto fail = [&f, &out]() {
+      out.clear();
+      f.close();
+      return false;
+    };
+
+    uint8_t version = 0;
+    uint16_t count = 0;
+    if (f.read(reinterpret_cast<uint8_t*>(&version), sizeof(version)) != sizeof(version) || version < 1 ||
+        version > FILE_VERSION ||
+        f.read(reinterpret_cast<uint8_t*>(&count), sizeof(count)) != sizeof(count) || count > MAX_BOOKMARKS) {
+      return fail();
+    }
+
+    uint32_t loadedRevision = legacyRevision;
+    if (version >= 4 &&
+        f.read(reinterpret_cast<uint8_t*>(&loadedRevision), sizeof(loadedRevision)) != sizeof(loadedRevision)) {
+      return fail();
+    }
+
+    if (count > 0 && !heapHasBlockFor(count * sizeof(Bookmark))) {
+      LOG_ERR("BKM", "No heap block for %u bookmark records", count);
+      return fail();
+    }
+    std::vector<Bookmark> loaded;
+    loaded.reserve(count);
+    for (uint16_t i = 0; i < count; ++i) {
+      Bookmark bm;
+      if (f.read(reinterpret_cast<uint8_t*>(&bm.spineIndex), sizeof(bm.spineIndex)) != sizeof(bm.spineIndex) ||
+          f.read(reinterpret_cast<uint8_t*>(&bm.pageNumber), sizeof(bm.pageNumber)) != sizeof(bm.pageNumber)) {
+        LOG_ERR("BKM", "Truncated bookmarks file at entry %d", i);
+        return fail();
+      }
+      if (version >= 2 && !readString(f, bm.name, MAX_PERSISTED_NAME_BYTES)) {
+        LOG_ERR("BKM", "Invalid bookmark name at entry %d", i);
+        return fail();
+      }
+      if (version >= 3 &&
+          (f.read(reinterpret_cast<uint8_t*>(&bm.remoteServerId), sizeof(bm.remoteServerId)) !=
+               sizeof(bm.remoteServerId) ||
+           !readString(f, bm.syncMetadata, MAX_SYNC_METADATA_LENGTH))) {
+        LOG_ERR("BKM", "Truncated sync metadata at entry %d", i);
+        return fail();
+      }
+      loaded.push_back(std::move(bm));
+    }
+    if (!f.close()) return fail();
+    out = std::move(loaded);
+    outRevision = loadedRevision;
+    LOG_DBG("BKM", "Loaded %d bookmarks", count);
+    return true;
+  }
+
+  bool recoverStoreFiles(std::vector<Bookmark>* loaded, uint32_t* loadedRevision,
+                        const uint32_t legacyRevision) {
+    const std::string path = getFilePath();
+    const std::string tempPath = path + ".tmp";
+    const std::string backupPath = path + ".bak";
+    const bool hasLive = Storage.exists(path.c_str());
+    const bool hasBackup = Storage.exists(backupPath.c_str());
+    storeFilesReady = false;
+
+    if (validateStoreFile(path)) {
+      if (loaded != nullptr) {
+        uint32_t revision = legacyRevision;
+        if (!readStoreFile(path, *loaded, revision, legacyRevision)) return false;
+        if (loadedRevision != nullptr) *loadedRevision = revision;
+      }
+      if (Storage.exists(tempPath.c_str())) Storage.remove(tempPath.c_str());
+      if (hasBackup && !Storage.remove(backupPath.c_str())) return true;
+      storeFilesReady = !Storage.exists(backupPath.c_str());
+      return true;
+    }
+
+    if (hasBackup && validateStoreFile(backupPath)) {
+      if (loaded != nullptr) {
+        uint32_t revision = legacyRevision;
+        if (!readStoreFile(backupPath, *loaded, revision, legacyRevision)) return false;
+        if (loadedRevision != nullptr) *loadedRevision = revision;
+      }
+      if ((hasLive && !Storage.remove(path.c_str())) || !Storage.rename(backupPath.c_str(), path.c_str())) {
+        return true;  // The valid backup stays available; a later save retries recovery.
+      }
+      if (Storage.exists(tempPath.c_str())) Storage.remove(tempPath.c_str());
+      storeFilesReady = true;
+      return true;
+    }
+
+    if (!hasLive && !hasBackup) {
+      if (Storage.exists(tempPath.c_str())) Storage.remove(tempPath.c_str());
+      storeFilesReady = true;
+    }
+    return false;
+  }
 
   [[nodiscard]] std::string getFilePath() const { return basePath + "/bookmarks.bin"; }
+
+
+  static bool readString(FsFile& f, std::string& out, const uint16_t maxLength) {
+    uint16_t length = 0;
+    if (f.read(reinterpret_cast<uint8_t*>(&length), sizeof(length)) != sizeof(length) || length > maxLength) {
+      return false;
+    }
+    out.clear();
+    if (length == 0) return true;
+    if (length > out.capacity() && !heapHasBlockFor(static_cast<size_t>(length) + 1)) {
+      LOG_ERR("BKM", "No heap block for %u-byte bookmark field", length);
+      return false;
+    }
+    out.resize(length);
+    return f.read(reinterpret_cast<uint8_t*>(&out[0]), length) == length;
+  }
 
   std::vector<Bookmark>::iterator find(uint16_t spineIndex, uint16_t pageNumber) {
     return std::find_if(bookmarks.begin(), bookmarks.end(), [spineIndex, pageNumber](const Bookmark& bm) {
@@ -179,3 +420,4 @@ class BookmarkStore {
     });
   }
 };
+

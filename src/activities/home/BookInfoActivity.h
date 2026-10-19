@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <array>
 #include <ctime>
 #include <string>
 #include <vector>
@@ -36,18 +37,37 @@ class BookInfoActivity final : public Activity {
   int descLinesPerPage = 0;
   int descTotalPages = 0;
 
+  // Review data stays on SD; each render window is at most 512 bytes and the
+  // wrapped-line vector is bounded to that one window, never the full note.
+  static constexpr size_t REVIEW_WINDOW_BYTES = 512;
+  static constexpr size_t REVIEW_MAX_WINDOWS = 80;
+  std::string reviewHash;
+  uint32_t reviewLength = 0;
+  bool hasReview = false;
+  bool showingReview = false;
+  std::array<char, REVIEW_WINDOW_BYTES + 1> reviewBuffer{};
+  std::vector<std::string> reviewLines;
+  std::array<uint32_t, REVIEW_MAX_WINDOWS> reviewWindowStarts{};
+  uint32_t reviewWindowEnd = 0;
+  size_t reviewWindowIndex = 0;
+  size_t reviewLineStart = 0;
+  int reviewLinesPerPage = 0;
+  int reviewWrappedWidth = 0;
+  bool reviewWindowLoaded = false;
+  bool reviewShowLastPage = false;
+
   // Partial-render caches: set on the first full render, reused when only the
   // description page changes.
   bool fullRenderDone = false;
-  // The rectangle the description is drawn in. One struct rather than four loose ints because
-  // it is PUBLISHED: render() writes it and loop() reads it to resolve a tap, on different
-  // tasks, and only the four together mean anything -- a mix of two frames' values is a tap
-  // answered against a rectangle that was never on screen.
+  // Paged-content band geometry and navigation flags are published together:
+  // render() writes them and loop() reads them to resolve taps on another task.
   struct DescBand {
     int x = 0;
     int y = 0;
     int width = 0;
     int height = 0;
+    bool hasPrevious = false;
+    bool hasNext = false;
   };
   DescBand descBand;
   SeqPublish descBandSeq;
@@ -60,6 +80,7 @@ class BookInfoActivity final : public Activity {
   void renderLoading();
   void loadData();
   void renderDescriptionAndHints();
+  bool loadReviewWindow();
 
  public:
   explicit BookInfoActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string filePath)

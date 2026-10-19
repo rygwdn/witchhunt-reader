@@ -77,6 +77,7 @@ bool JsonSettingsIO::saveState(const CrossPointState& s, const char* path) {
   jump["bookPath"] = s.pendingBookmarkJump.bookPath;
   jump["spineIndex"] = s.pendingBookmarkJump.spineIndex;
   jump["pageNumber"] = s.pendingBookmarkJump.pageNumber;
+  jump["xpointer"] = s.pendingBookmarkJump.xpointer;
 
   if (doc.overflowed()) {
     LOG_ERR("CPS", "JSON document overflowed while building state");
@@ -164,6 +165,7 @@ bool JsonSettingsIO::loadState(CrossPointState& s, const char* json) {
   s.pendingBookmarkJump.bookPath = jump["bookPath"] | std::string("");
   s.pendingBookmarkJump.spineIndex = jump["spineIndex"].as<uint16_t>();
   s.pendingBookmarkJump.pageNumber = jump["pageNumber"].as<uint16_t>();
+  s.pendingBookmarkJump.xpointer = jump["xpointer"] | std::string("");
   return true;
 }
 
@@ -440,6 +442,7 @@ bool JsonSettingsIO::saveKOReader(const KOReaderCredentialStore& store, const ch
   doc["serverUrl"] = store.getServerUrl();
   doc["matchMethod"] = static_cast<uint8_t>(store.getMatchMethod());
   doc["sendMetadata"] = store.getSendMetadata();
+  doc["bookOrbitCatalog"] = store.getCatalogCapable();
   doc["syncBehavior"] = static_cast<uint8_t>(store.getSyncBehavior());
   doc["syncOnWake"] = store.getSyncOnWake();
   doc["syncOnSleep"] = store.getSyncOnSleep();
@@ -484,6 +487,7 @@ bool JsonSettingsIO::loadKOReader(KOReaderCredentialStore& store, const char* js
   uint8_t method = doc["matchMethod"].as<uint8_t>();
   store.matchMethod = static_cast<DocumentMatchMethod>(method);
   store.sendMetadata = doc["sendMetadata"].as<bool>();
+  store.catalogCapable = doc["bookOrbitCatalog"] | false;
 
   // A file written before this key existed belongs to someone already using the chooser.
   // Default them to ASK_EVERY_TIME rather than the SMART the member initialiser carries, so

@@ -29,6 +29,9 @@ class KOReaderAuthActivity final : public Activity {
   State state = WIFI_SELECTION;
   std::string statusMessage;
   std::string errorMessage;
+  // Set when the authenticated server also serves BookOrbit's catalog, so the
+  // success screen can say the library is now reachable from Home.
+  bool catalogDetected = false;
 
   void onWifiSelectionComplete(bool success);
   void performAuthentication();

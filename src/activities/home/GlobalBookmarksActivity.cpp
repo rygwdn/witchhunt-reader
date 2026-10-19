@@ -17,6 +17,7 @@
 #include "activities/util/KeyboardEntryActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "BookOrbitBookmarkSync.h"
 
 void GlobalBookmarksActivity::onEnter() {
   Activity::onEnter();
@@ -106,7 +107,9 @@ std::string GlobalBookmarksActivity::getRowTitle(int index) const {
   if (!bm.name.empty()) return bm.name;
 
   char buf[64];
-  if (entry.isTxt) {
+  if (bm.pageNumber == BookmarkStore::UNKNOWN_PAGE_NUMBER) {
+    snprintf(buf, sizeof(buf), "%s%d", tr(STR_SECTION_PREFIX), bm.spineIndex + 1);
+  } else if (entry.isTxt) {
     snprintf(buf, sizeof(buf), "%s%d", tr(STR_PAGE_PREFIX), bm.pageNumber + 1);
   } else {
     snprintf(buf, sizeof(buf), "%s%d, %s%d", tr(STR_SECTION_PREFIX), bm.spineIndex + 1, tr(STR_PAGE_PREFIX),
@@ -139,9 +142,12 @@ void GlobalBookmarksActivity::openSelected() {
 
   auto& jump = APP_STATE.pendingBookmarkJump;
   jump.active = true;
-  jump.bookPath = entry.sourcePath;
   jump.spineIndex = bm.spineIndex;
-  jump.pageNumber = bm.pageNumber;
+  jump.pageNumber = bm.pageNumber == BookmarkStore::UNKNOWN_PAGE_NUMBER ? 0 : bm.pageNumber;
+  BookOrbitBookmarkSync::PositionMetadataView metadata;
+  jump.xpointer = BookOrbitBookmarkSync::decodePositionMetadata(bm.syncMetadata, metadata)
+                      ? std::string(metadata.position)
+                      : std::string{};
   APP_STATE.saveToFile();
 
   LOG_DBG("GBA", "Jumping to bookmark in %s at %u/%u", entry.sourcePath.c_str(), bm.spineIndex, bm.pageNumber);

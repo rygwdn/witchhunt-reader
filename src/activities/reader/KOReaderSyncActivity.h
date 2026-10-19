@@ -161,6 +161,7 @@ class KOReaderSyncActivity final : public Activity {
   // WiFi.getMode() because intermediate paths call esp_wifi_stop() to drop the
   // radio while user reads the result, which makes WiFi.getMode() return WIFI_MODE_NULL.
   bool wifiActivated = false;
+  bool bookmarkSyncAttempted = false;
 
   // Captured from APP_STATE.koReaderSyncSession's postAction/postActionTarget in resumeReader()
   // so onExit() can route the silent reboot even after resumeReader() has cleared the persisted
@@ -191,6 +192,8 @@ class KOReaderSyncActivity final : public Activity {
   bool handleAutoPushPreflight();
   void performFetchAndCompare();
   void performUpload();
+  // BookOrbit bookmark exchange is independent of KOReader's progress choice.
+  void syncBookmarks();
   void closeCancelled();
   void resumeReader(KOReaderSyncOutcomeState outcome, const SyncResult* appliedResult = nullptr);
   bool ensureEpubLoadedForMapping();

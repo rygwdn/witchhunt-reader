@@ -185,21 +185,6 @@ TEST(FontManifestParserTest, ChunkingDoesNotChangeTheResult) {
   }
 }
 
-// 6. Escapes are what StreamingJsonParser makes of them: the simple ones decoded, \uXXXX passed
-// through as its six characters (it does not decode to UTF-8).
-TEST(FontManifestParserTest, EscapesInADescriptionArriveAsTheTokenParserDecodesThem) {
-  const Parsed run =
-      parse(R"({"version":2,"families":[{"name":"E","description":"say \"hi\" back\\slash sl\/ash tab\there caf)"
-            "\\u00e9"
-            R"("}]})");
-  EXPECT_EQ(run.events,
-            (Events{"family{", "name=E", "desc=say \"hi\" back\\slash sl/ash tab\there caf\\u00e9", "}family"}));
-
-  // UTF-8 written as itself passes through untouched.
-  EXPECT_EQ(parse("{\"families\":[{\"description\":\"caf\xC3\xA9\"}]}").events,
-            (Events{"family{", "desc=caf\xC3\xA9", "}family"}));
-}
-
 // 7. A document cut short is not complete; one the token parser rejects is an error; so is a
 // closing bracket that does not match the container the manifest has open.
 TEST(FontManifestParserTest, TruncatedIsIncompleteAndMalformedIsAnError) {

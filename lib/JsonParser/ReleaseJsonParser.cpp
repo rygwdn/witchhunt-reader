@@ -52,8 +52,17 @@ bool parseSha256Digest(const char* value, size_t len, uint8_t* out) {
 }  // namespace
 
 ReleaseJsonParser::ReleaseJsonParser()
-    : parser(JsonCallbacks{this, sOnKey, sOnString, sOnNumber, sOnBool, sOnNull, sOnObjectStart, sOnObjectEnd,
-                           sOnArrayStart, sOnArrayEnd, sOnStringOverflow}) {
+    : parser(JsonCallbacks{.ctx = this,
+                           .onKey = sOnKey,
+                           .onString = sOnString,
+                           .onNumber = sOnNumber,
+                           .onBool = sOnBool,
+                           .onNull = sOnNull,
+                           .onObjectStart = sOnObjectStart,
+                           .onObjectEnd = sOnObjectEnd,
+                           .onArrayStart = sOnArrayStart,
+                           .onArrayEnd = sOnArrayEnd,
+                           .onStringOverflow = sOnStringOverflow}) {
   safeCopy(firmwareAssetName, sizeof(firmwareAssetName), "firmware.bin", sizeof("firmware.bin") - 1);
   reset();
 }

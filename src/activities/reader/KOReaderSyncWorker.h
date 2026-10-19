@@ -4,16 +4,20 @@
 
 #if CROSSPOINT_KOREADER_AUTOSYNC
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 
 #include "KOReaderSyncClient.h"
+#include <BookOrbitBookmarkTypes.h>
+
 
 struct KOReaderSyncJob {
-  enum Kind { FETCH_PROGRESS, SILENT_PUSH };
+  enum Kind { FETCH_PROGRESS, SILENT_PUSH, BOOKMARK_CONTINUE };
   Kind kind = FETCH_PROGRESS;
 
   std::string primaryHash;
+  std::string bookOrbitHash;
   std::string altHash;
   bool smartProbe = false;
 
@@ -26,10 +30,27 @@ struct KOReaderSyncJob {
 
   unsigned long connectTimeoutMs = 0;
 
+  enum AttemptOutcome { COMPLETED, DEFERRED, CANCELLED };
+  AttemptOutcome attemptOutcome = COMPLETED;
+  int httpStatus = 0;
+  int transportError = 0;
+
   KOReaderSyncClient::Error result = KOReaderSyncClient::OK;
   KOReaderProgress remote;
   KOReaderSyncClient::Error altResult = KOReaderSyncClient::NOT_FOUND;
   KOReaderProgress altRemote;
+
+  bool hasBookmarkExchange = false;
+  bool hasBookmarkAck = false;
+  bool bookmarkResponseReady = false;
+  bool bookmarkSucceeded = false;
+  BookOrbitBookmarkExchangeBook bookmarkExchange;
+  BookOrbitBookmarkExchangeResult bookmarkResponse;
+  BookOrbitBookmarkAckBook bookmarkAck;
+  uint32_t bookmarkRevision = 0;
+  size_t bookmarkBatchSize = 0;
+  size_t bookmarkChangeOffset = 0;
+  size_t bookmarkTotalChanges = 0;
 };
 
 namespace KOReaderSyncWorker {

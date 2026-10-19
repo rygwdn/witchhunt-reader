@@ -186,9 +186,7 @@ std::string findXPathForProgressInternal(const std::shared_ptr<Epub>& epub, cons
 
 namespace {
 
-// One streamed pass of the offset path. `inclusive` names the chunk that ENDS at the target
-// instead of the one that contains it. `atChapterEnd` reports a pass that found nothing because
-// the target is the chapter's own total: the parse completed and counted exactly that many bytes.
+// One streamed offset pass; an inclusive retry can name the last text node at chapter end.
 std::string visibleOffsetPass(const std::shared_ptr<Epub>& epub, const int spineIndex, const uint32_t visibleOffset,
                               const bool inclusive, bool& atChapterEnd) {
   atChapterEnd = false;
@@ -212,10 +210,6 @@ std::string findXPathForVisibleOffsetInternal(const std::shared_ptr<Epub>& epub,
                                               const uint32_t visibleOffset) {
   bool atChapterEnd = false;
   std::string result = visibleOffsetPass(epub, spineIndex, visibleOffset, /*inclusive=*/false, atChapterEnd);
-  // A page that starts at the chapter's total (a last page holding only an image or spacing) has no
-  // text at or after its start, and the fraction fallback would land early. Name the end of the
-  // last text node instead: the inclusive pass picks the chunk that ends there, and one past its
-  // last visible byte is its collapsed count. The passes run one after the other, never together.
   if (result.empty() && atChapterEnd && visibleOffset > 0) {
     bool unused = false;
     result = visibleOffsetPass(epub, spineIndex, visibleOffset, /*inclusive=*/true, unused);
@@ -224,5 +218,4 @@ std::string findXPathForVisibleOffsetInternal(const std::shared_ptr<Epub>& epub,
           result.empty() ? "(not found)" : result.c_str());
   return result;
 }
-
 }  // namespace ChapterXPathIndexerInternal

@@ -9,8 +9,10 @@
 
 #include "CrossPointState.h"
 #include "KOReaderCredentialStore.h"
+#include "BookOrbitBookmarkSync.h"
 #include "KOReaderDocumentId.h"
 #include "ProgressComparison.h"
+#include "ReadingSessionTracker.h"
 #include "activities/ActivityManager.h"
 
 namespace {
@@ -84,25 +86,125 @@ KOReaderPosition EpubReaderActivity::currentKoPosition(const int page, const int
   return ProgressMapper::toKOReader(epub, pos);
 }
 
+
+void EpubReaderActivity::prepareAutoBookmarkSnapshot(KOReaderSyncJob& job, const size_t changeOffset) {
+  if (!epub || bookOrbitHash_.empty() || !KOREADER_STORE.hasCredentials() || !KOREADER_STORE.getCatalogCapable()) {
+    return;
+  }
+  size_t totalChanges = 0;
+  uint32_t revision = 0;
+  if (!BookOrbitBookmarkSync::prepareExchange(bookmarkStore, epub, bookOrbitHash_, changeOffset,
+                                              job.bookmarkExchange, totalChanges, revision)) {
+    LOG_ERR("AutoSync", "Bookmark snapshot failed for %s", epub->getPath().c_str());
+    return;
+  }
+  job.hasBookmarkExchange = true;
+  job.bookmarkRevision = revision;
+  job.bookmarkChangeOffset = changeOffset;
+  job.bookmarkTotalChanges = totalChanges;
+  job.bookmarkBatchSize = job.bookmarkExchange.changes.size();
+  if (changeOffset != 0) {
+    job.bookmarkExchange.keys.clear();
+    job.bookmarkExchange.keysComplete = false;
+  }
+}
+
+bool EpubReaderActivity::handleAutoBookmarkResponse(KOReaderSyncJob& job, const bool allowFollowup) {
+  if (!job.hasBookmarkExchange) {
+    if (!allowFollowup || job.kind == KOReaderSyncJob::BOOKMARK_CONTINUE ||
+        (job.result != KOReaderSyncClient::OK && job.result != KOReaderSyncClient::NOT_FOUND)) {
+      return false;
+    }
+    KOReaderSyncJob next;
+    next.kind = KOReaderSyncJob::BOOKMARK_CONTINUE;
+    prepareAutoBookmarkSnapshot(next);
+    uint64_t seq = 0;
+    if (next.hasBookmarkExchange && KOReaderSyncWorker::post(std::move(next), &seq)) {
+      autoSyncBookmarkSeq = seq;
+      return true;
+    }
+    return false;
+  }
+  if (!job.bookmarkSucceeded || !job.bookmarkResponseReady) {
+    AUTOSYNC_STATE.markSyncFailed();
+    return false;
+  }
+
+  KOReaderSyncJob next;
+  next.kind = KOReaderSyncJob::BOOKMARK_CONTINUE;
+  bool applied = false;
+  if (bookmarkStore.revision() == job.bookmarkRevision) {
+    BookOrbitBookmarkSync::ApplyResult result;
+    applied = BookOrbitBookmarkSync::applyResponse(bookmarkStore, epub, epub->getPath(), epub->getCachePath(),
+                                                   epub->getTitle(), job.bookmarkRevision, job.bookmarkResponse, result);
+    if (applied && (!result.ack.applied.empty() || !result.ack.deleted.empty())) {
+      next.hasBookmarkAck = true;
+      next.bookmarkAck = std::move(result.ack);
+    }
+    if (result.positionFailure) {
+      AUTOSYNC_STATE.markSyncFailed();
+    }
+    if (!applied) {
+      AUTOSYNC_STATE.markSyncFailed();
+    }
+  } else {
+    LOG_INF("AutoSync", "Bookmark response superseded by local edits; not applying or acknowledging");
+  }
+
+  const bool localMore = job.bookmarkChangeOffset + job.bookmarkBatchSize < job.bookmarkTotalChanges;
+  const bool remoteMore = job.bookmarkResponse.more;
+  if (allowFollowup && applied && localMore) {
+    prepareAutoBookmarkSnapshot(next, job.bookmarkChangeOffset + job.bookmarkBatchSize);
+  } else if (allowFollowup && applied && remoteMore) {
+    next.hasBookmarkExchange = true;
+    next.bookmarkExchange.hash = bookOrbitHash_;
+    next.bookmarkRevision = bookmarkStore.revision();
+  }
+
+  if (!next.hasBookmarkAck && !next.hasBookmarkExchange) {
+    next.hasBookmarkExchange = false;
+  }
+  uint64_t seq = 0;
+  if (next.hasBookmarkAck || next.hasBookmarkExchange) {
+    if (KOReaderSyncWorker::post(std::move(next), &seq)) {
+      autoSyncBookmarkSeq = seq;
+      return true;
+    }
+    LOG_DBG("AutoSync", "Bookmark follow-up deferred: sync worker busy");
+  } else {
+    // The worker retains WiFi only while a main-thread response is outstanding.
+    next.hasBookmarkExchange = false;
+    KOReaderSyncWorker::post(std::move(next), &seq);
+  }
+  return false;
+}
 void EpubReaderActivity::maybeAutoPullOnWake() {
   if (!KOReaderAutoSync::pullEnabled()) {
+    autoSyncPullPending = false;
+    return;
+  }
+  if (!KOReaderAutoSync::automaticAttemptAllowed()) {
+    // This resume is skipped, not queued for a timer-driven retry.
     autoSyncPullPending = false;
     return;
   }
   if (KOReaderAutoSync::jobActive()) {
     return;
   }
+  // Take a stable document path while the render task cannot replace the EPUB. Hashing the copy
+  // below does not need the render lock.
+  std::string path;
   {
     RenderLock lock(RenderLock::Mode::Try);
     if (!lock.ownsLock() || !autoSyncReaderIsQuiet()) {
       return;
     }
+    path = epub->getPath();
   }
   if (!KOReaderAutoSync::heapAllowsBackgroundSession("Wake pull")) {
     return;
   }
 
-  const std::string path = epub->getPath();
   const DocumentMatchMethod method = KOReaderAutoSync::effectiveMatchMethod(path);
   std::string primaryHash = hashFor(path, method);
   if (primaryHash.empty()) {
@@ -121,6 +223,15 @@ void EpubReaderActivity::maybeAutoPullOnWake() {
     }
   }
   job.primaryHash = std::move(primaryHash);
+  // The bookmark snapshot reads EPUB/cache metadata; revalidate the same quiet document first.
+  {
+    RenderLock lock(RenderLock::Mode::Try);
+    if (!lock.ownsLock() || !autoSyncReaderIsQuiet() || epub->getPath() != path) {
+      return;
+    }
+    job.bookOrbitHash = globalReadingSessionTracker().getBookOrbitHash();
+    prepareAutoBookmarkSnapshot(job);
+  }
 
   uint64_t seq = 0;
   if (!KOReaderSyncWorker::post(std::move(job), &seq)) {
@@ -163,6 +274,7 @@ bool EpubReaderActivity::pollAutoSyncPull() {
 bool EpubReaderActivity::evaluateAutoSyncPull() {
   autoSyncPullDialogLaunched = false;
   KOReaderSyncJob job = std::exchange(autoSyncPullJob, {});
+  handleAutoBookmarkResponse(job);
 
   const bool smart = KOREADER_STORE.getSyncBehavior() == KOReaderSyncBehavior::SMART;
   const std::string path = epub->getPath();
@@ -260,8 +372,11 @@ void EpubReaderActivity::silentUploadCurrentPosition() {
     return;
   }
   const KOReaderPosition local = currentKoPosition(page, total);
-  autoSyncPushSeq = KOReaderAutoSync::pushSilentAsync(epub->getPath(), local, currentSpineIndex, page, epub->getTitle(),
-                                                      epub->getAuthor());
+  KOReaderSyncJob job = KOReaderAutoSync::makeSilentPushJob(epub->getPath(), local, currentSpineIndex, page,
+                                                           epub->getTitle(), epub->getAuthor(),
+                                                           globalReadingSessionTracker().getBookOrbitHash());
+  prepareAutoBookmarkSnapshot(job);
+  autoSyncPushSeq = KOReaderAutoSync::pushSilentAsync(std::move(job));
 }
 
 // The caller holds the render lock, which covers both the position mapping (epub's metadata
@@ -307,7 +422,7 @@ void EpubReaderActivity::maybeAutoPushInterval() {
   if (activityManager.inSleepTransition()) {
     return;
   }
-  if (!KOReaderAutoSync::intervalPushEnabled()) {
+  if (!KOReaderAutoSync::intervalPushEnabled() || !KOReaderAutoSync::automaticAttemptAllowed()) {
     return;
   }
   if (!AUTOSYNC_STATE.lastNoteWasTurn()) {
@@ -335,16 +450,38 @@ void EpubReaderActivity::maybeAutoPushInterval() {
   }
   const KOReaderPosition local = currentKoPosition(page, total);
   autoSyncLastPushAt = millis();
-  autoSyncPushSeq = KOReaderAutoSync::pushSilentAsync(epub->getPath(), local, currentSpineIndex, page, epub->getTitle(),
-                                                      epub->getAuthor());
+  KOReaderSyncJob job = KOReaderAutoSync::makeSilentPushJob(epub->getPath(), local, currentSpineIndex, page,
+                                                           epub->getTitle(), epub->getAuthor(),
+                                                           globalReadingSessionTracker().getBookOrbitHash());
+  prepareAutoBookmarkSnapshot(job);
+  autoSyncPushSeq = KOReaderAutoSync::pushSilentAsync(std::move(job));
 }
 
+// Keep a completed job unconsumed on a busy tick; its response handler reads EPUB/cache state.
 void EpubReaderActivity::pollAutoSyncJob() {
-  if (autoSyncPushSeq == 0 || !KOReaderSyncWorker::isDone(autoSyncPushSeq)) {
+  RenderLock lock(RenderLock::Mode::Try);
+  if (!lock.ownsLock() || autoSyncPushSeq == 0 || !KOReaderSyncWorker::isDone(autoSyncPushSeq)) {
     return;
   }
-  KOReaderAutoSync::finalizeSilentPush(autoSyncPushSeq);
+  KOReaderSyncJob job = KOReaderSyncWorker::consume(autoSyncPushSeq);
   autoSyncPushSeq = 0;
+  KOReaderAutoSync::finalizeSilentPush(job);
+  handleAutoBookmarkResponse(job);
+}
+
+// The response may read the EPUB/cache through handleAutoBookmarkResponse().
+void EpubReaderActivity::pollAutoBookmarkJob() {
+  RenderLock lock(RenderLock::Mode::Try);
+  if (!lock.ownsLock() || autoSyncBookmarkSeq == 0 || !KOReaderSyncWorker::isDone(autoSyncBookmarkSeq)) {
+    return;
+  }
+  KOReaderSyncJob job = KOReaderSyncWorker::consume(autoSyncBookmarkSeq);
+  autoSyncBookmarkSeq = 0;
+  if (job.bookmarkResponseReady) {
+    handleAutoBookmarkResponse(job);
+  } else if (job.result != KOReaderSyncClient::OK || !job.bookmarkSucceeded) {
+    AUTOSYNC_STATE.markSyncFailed();
+  }
 }
 
 void EpubReaderActivity::refreshAutoSyncIndicator() {
@@ -371,11 +508,12 @@ void EpubReaderActivity::serviceAutoSync() {
   if (pollAutoSyncPull()) {
     return;
   }
-  pollAutoSyncJob();
+  pollAutoBookmarkJob();
   refreshAutoSyncIndicator();
 
   int spine = 0;
   int page = 0;
+  std::string path;
   {
     RenderLock lock(RenderLock::Mode::Try);
     if (!lock.ownsLock()) {
@@ -384,25 +522,40 @@ void EpubReaderActivity::serviceAutoSync() {
     if (epub == nullptr || section == nullptr) {
       return;
     }
+    path = epub->getPath();
     spine = currentSpineIndex;
     page = section->currentPage;
   }
   // Outside the lock: noteProgress() may write its state file.
-  AUTOSYNC_STATE.noteProgress(epub->getPath(), spine, page);
+  AUTOSYNC_STATE.noteProgress(path, spine, page);
   maybeAutoPushInterval();
 }
 
+
 void EpubReaderActivity::releaseAutoSyncSlot() {
-  if (autoSyncPushSeq != 0) {
-    KOReaderAutoSync::finalizeSilentPush(autoSyncPushSeq);
-    autoSyncPushSeq = 0;
+  if (autoSyncPushSeq != 0 && KOReaderSyncWorker::isDone(autoSyncPushSeq)) {
+    KOReaderSyncJob job = KOReaderSyncWorker::consume(autoSyncPushSeq);
+    KOReaderAutoSync::finalizeSilentPush(job);
+    handleAutoBookmarkResponse(job, false);
   }
-  if (autoSyncPullSeq != 0) {
-    KOReaderSyncWorker::consume(autoSyncPullSeq);
-    autoSyncPullSeq = 0;
+  autoSyncPushSeq = 0;
+
+  if (autoSyncPullSeq != 0 && KOReaderSyncWorker::isDone(autoSyncPullSeq)) {
+    KOReaderSyncJob job = KOReaderSyncWorker::consume(autoSyncPullSeq);
+    handleAutoBookmarkResponse(job, false);
+  }
+  autoSyncPullSeq = 0;
+  if (autoSyncPullJobPending) {
+    handleAutoBookmarkResponse(autoSyncPullJob, false);
   }
   autoSyncPullJob = KOReaderSyncJob{};
   autoSyncPullJobPending = false;
+
+  if (autoSyncBookmarkSeq != 0 && KOReaderSyncWorker::isDone(autoSyncBookmarkSeq)) {
+    KOReaderSyncJob job = KOReaderSyncWorker::consume(autoSyncBookmarkSeq);
+    handleAutoBookmarkResponse(job, false);
+  }
+  autoSyncBookmarkSeq = 0;
 }
 
 // From onExit(), which ActivityManager runs under the exclusive render lock, so the section and
@@ -434,8 +587,11 @@ void EpubReaderActivity::maybeAutoPushOnSleep() {
 
   saveProgress(currentSpineIndex, page, total);
   const KOReaderPosition local = currentKoPosition(page, total);
-  KOReaderAutoSync::stashSleepPush(epub->getPath(), local, currentSpineIndex, page, epub->getTitle(),
-                                   epub->getAuthor());
+  KOReaderSyncJob job = KOReaderAutoSync::makeSilentPushJob(epub->getPath(), local, currentSpineIndex, page,
+                                                           epub->getTitle(), epub->getAuthor(),
+                                                           globalReadingSessionTracker().getBookOrbitHash());
+  prepareAutoBookmarkSnapshot(job);
+  KOReaderAutoSync::stashSleepPush(std::move(job));
 }
 
 #endif

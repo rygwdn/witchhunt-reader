@@ -103,6 +103,7 @@ struct DictionarySwitchResult {
 struct StarredPageResult {
   int spineIndex = 0;
   int pageNumber = 0;
+  std::string xpointer;
 };
 
 // Which answer ConfirmationActivity was given, when it was not Cancel. Only a question with an

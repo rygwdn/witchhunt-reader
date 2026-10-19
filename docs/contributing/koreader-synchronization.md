@@ -249,6 +249,12 @@ screen is launched only after the lock is released (`pollAutoSyncPull`), and `si
 takes no lock of its own but relies on its caller's. The sleep push needs none of its own:
 `ActivityManager` runs `onExit()` under the render lock.
 
+The wake pull copies the document path under the lock, hashes that copy outside it, then reacquires
+the lock to confirm the same quiet EPUB and prepare any bookmark snapshot before posting. Completion
+handlers that read EPUB/cache state acquire the try-lock before consuming their job; a pull result
+already consumed stays pending until the lock is available. The lock is never held for the worker's
+network request.
+
 **Links.** The sleep push is skipped while a link followed in this session has not been returned
 from (`sessionLinkDepth_`, kept by `EpubLinkBackStack::push` and `pop`); the position stays pending
 for the next push. It does not read the Back stack's depth (`footnoteDepth`): that stack persists in
