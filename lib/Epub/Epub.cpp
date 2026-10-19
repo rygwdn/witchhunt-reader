@@ -2056,14 +2056,25 @@ bool Epub::readItemContentsToStream(const std::string& itemHref, Print& out, con
     return false;
   }
 
-  // A lent region (the caller's, or the one lent to load()) hosts the read buffer and the inflate
-  // ring when it has room for the largest ring; the decision is made before any byte reaches
-  // `out`, so a refusal falls through to the heap path cleanly. A missing entry fails there
-  // again, at negligible cost.
+  // Keep load-time scratch on its historical maximum-ring path. Explicit callers
+  // may use a smaller entry-sized ring through the same streaming API below.
   BuildArena* const arena = scratch != nullptr ? scratch : loadScratch_;
-  if (arena != nullptr && arena->valid()) {
-    if (arena->capacity() - arena->used() >= streamScratchBytes()) {
+  if (scratch == nullptr && arena != nullptr && arena->valid()) {
+    const size_t wanted = streamScratchBytes();
+    if (arena->capacity() - arena->used() >= wanted) {
       return readItemContentsToStreamWithArena(itemHref, out, arena, stop);
+    }
+  }
+
+  // Explicit caller arenas (e.g. KoSync's PSRAM scratch) may serve a smaller ring. If they refuse
+  // before EntryReader opens, retry on heap; never retry after output may have started.
+  if (scratch != nullptr && scratch->valid()) {
+    bool readerOpened = false;
+    if (readItemContentsToStreamWithArena(itemHref, out, arena, stop, chunkSize, &readerOpened)) {
+      return true;
+    }
+    if (readerOpened) {
+      return false;
     }
   }
 
@@ -2086,34 +2097,32 @@ size_t Epub::readItemHeaderBytes(const std::string& itemHref, uint8_t* outBuf, c
 }
 
 bool Epub::readItemContentsToStreamWithArena(const std::string& itemHref, Print& out, BuildArena* arena,
-                                             const bool* stop) const {
+                                             const bool* stop, const size_t chunkSize, bool* readerOpened) const {
+  if (readerOpened != nullptr) *readerOpened = false;
   const std::string path = FsHelpers::normalisePath(itemHref);
   ZipFile zip(filepath);
   primeZip(zip);
 
   // EntryReader is the only deflate path in ZipFile that can take an arena; readFileToStream
-  // always mallocs. Same 1 KB chunk size as that path, so the SD write pattern is unchanged.
-  ZipFile::EntryReader reader(zip, 1024, arena);
-  ZipFile::FileStatSlim stat = {};
-  const bool found = lookupItemStat(zip, path, &stat);
-  if (!found) LOG_ERR("EBP", "Entry not found: %s", path.c_str());
-  const bool opened = found && reader.open(stat);
+  // always mallocs. Keep the same chunk size as the heap path.
+  ZipFile::EntryReader reader(zip, chunkSize, arena);
+  const bool opened = reader.open(path.c_str());
+  if (readerOpened != nullptr) *readerOpened = opened;
   adoptZipDetails(zip);
   if (!opened) return false;
 
-  // Staging buffer on the stack rather than from the arena: the reader holds an arena block
+  // Staging buffer is bounded on the stack rather than the arena: the reader holds an arena block
   // until close(), and a nested block would have to be released before it (BuildArena is LIFO).
-  // 512 B is nothing against the ~8 KB task stack, and this runs once per image, ever.
   uint8_t buffer[512];
   bool done = false;
   while (!done) {
     size_t produced = 0;
     if (!reader.step(buffer, sizeof(buffer), &produced, &done)) {
-      LOG_ERR("EBP", "Arena extract failed mid-stream: %s", path.c_str());
+      LOG_ERR("EBP", "Arena stream failed mid-entry: %s", path.c_str());
       return false;
     }
     if (produced > 0 && out.write(buffer, produced) != produced) {
-      LOG_ERR("EBP", "Failed to write all extracted bytes: %s", path.c_str());
+      LOG_ERR("EBP", "Failed to write all streamed bytes: %s", path.c_str());
       return false;
     }
     if (stop && *stop) return true;
@@ -2249,9 +2258,10 @@ void Epub::ensureSpineStats() const {
   // falls back to per-spine scans (correct, slower) instead of aborting under -fno-exceptions.
   const size_t perSpine = sizeof(ZipFile::FileStatSlim) + sizeof(ZipFile::SizeTarget);
   const size_t needed = static_cast<size_t>(spineCount) * perSpine + 32u * 1024u;
-  if (esp_get_free_heap_size() < needed) {
+  const uint32_t freeHeap = internalFreeBytes();
+  if (freeHeap < needed) {
     LOG_INF("EBP", "spine-stat cache skipped (need %lu, free %lu) — falling back to per-spine scans",
-            static_cast<unsigned long>(needed), static_cast<unsigned long>(esp_get_free_heap_size()));
+            static_cast<unsigned long>(needed), static_cast<unsigned long>(freeHeap));
     return;
   }
 

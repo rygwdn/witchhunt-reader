@@ -255,6 +255,18 @@ There are three ways to get framebuffer memory back. Prefer the first.
 
 The third way, releasing **both** buffers, is only for sessions that end in a reboot (Scenario 2).
 
+Scratch consumers use `GfxScratchBuffer` for a shared ownership policy:
+
+- On PSRAM boards, build/index scratch requests dedicated PSRAM storage; image-warm
+  and manifest scratch prefer it. Long-lived owners retain backing between passes;
+  one-shot indexing frees it at scope exit. Successful allocations keep the secondary resident.
+- Preferred allocations may explicitly fall back to borrowing. `DedicatedOnly` never borrows.
+- On C3, preferred/borrow-only paths use the existing secondary-buffer loan protocol.
+
+`release()` ends use but retains dedicated backing; `reset()` also frees it. Borrowed regions
+return on release. Destroy every arena/user before releasing its region. The borrower procedure
+below applies to C3 and allocation-failure fallbacks.
+
 Borrowers today: Home cover loading, the Library's titles, covers and book-index build
 (`FileBrowserActivity`), the font selector's previews (`FontSelectionActivity`), first-open indexing
 in `ReaderActivity`, the reader's Background-B and Background-C builds, the blocking build when it can

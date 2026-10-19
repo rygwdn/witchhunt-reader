@@ -50,6 +50,7 @@ set(PIPELINE_SOURCES
   ${REPO_ROOT}/lib/CooperativeAbort/CooperativeAbort.cpp
   ${REPO_ROOT}/lib/Utf8/Utf8.cpp
   ${REPO_ROOT}/lib/GfxRenderer/Bitmap.cpp
+  ${REPO_ROOT}/lib/GfxRenderer/GfxScratchBuffer.cpp
   ${REPO_ROOT}/lib/GfxRenderer/BitmapHelpers.cpp
   ${REPO_ROOT}/lib/JpegToBmpConverter/JpegToBmpConverter.cpp
   ${REPO_ROOT}/lib/ProgressiveJpegDc/ProgressiveJpegDc.cpp
@@ -117,6 +118,7 @@ add_executable(EpubPipelineTest
   TocBoundariesAfterBuildTest.cpp
   SpanAnchorTest.cpp
   ImageExtractionTest.cpp
+  StreamReadArenaTest.cpp
   ImageManifestTest.cpp
   ImageWrapperWidthTest.cpp
   HeadingBlockLayoutTest.cpp
@@ -135,6 +137,7 @@ add_executable(EpubPipelineTest
   PlaceholderOnlyScopeTest.cpp
   PixelCacheWriteTest.cpp
   BufferedPrintTest.cpp
+  GfxScratchBufferTest.cpp
   CoverPipelineTest.cpp
   CoverWrapperTest.cpp
   CoverFallbackTest.cpp
@@ -167,6 +170,7 @@ add_executable(EpubPipelineTest
 target_include_directories(EpubPipelineTest PRIVATE ${PIPELINE_INCLUDES})
 target_compile_definitions(EpubPipelineTest PRIVATE
   CORPUS_DIR="${REPO_ROOT}/test/epubs"
+  FIXTURE_EPUB="${REPO_ROOT}/test/fixtures/moby-dick.epub"
   GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/goldens"
   JPEG_FIXTURE_DIR="${REPO_ROOT}/test/jpeg_decoder/fixtures"
   FONT_FIXTURE_DIR="${REPO_ROOT}/lib/EpdFont/builtinFonts/source"

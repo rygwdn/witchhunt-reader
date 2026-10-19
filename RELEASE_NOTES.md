@@ -209,6 +209,11 @@ Where the code here is someone else's, it is credited in the source file it live
 - **Home's Browse files and Recent books switches become one Library switch**, on if either of them was on, and Home's OPDS Browser entry moves into File Transfer.
 - **Font sizes are now stored in points.** Your sizes are converted on the first start and kept. If you go back to an older firmware, it resets a size of 9 pt or more to the default, and reads a smaller one as a different size.
 - **Catalan, Spanish and Vietnamese gained a few labels** from crosspoint-reader before the full translation, and German's message for a chapter with no content now reads "Leeres Kapitel" instead of "Kapitelende" ("end of chapter").
+### Reading and sync
+
+- **On X4 Pro and T5 S3, chapter-progress mapping uses PSRAM for ZIP inflate scratch when
+  available.** If that allocation is unavailable, it falls back to the existing heap path; C3
+  behavior is unchanged.
 
 ## 2.37 — 2026-09-29
 

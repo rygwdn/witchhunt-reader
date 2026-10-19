@@ -1,6 +1,7 @@
 #pragma once
 
 #include <BuildArena.h>
+#include <GfxScratchBuffer.h>
 #include <FileIndex.h>
 
 #include <array>
@@ -82,9 +83,11 @@ class FileBrowserActivity final : public UiListActivity {
   void drawFolderCard(const Rect& card, int books);
   bool handleCoverTouch();
 
+  // Cover pages are decoded into scratch independent of the display on PSRAM boards.
+  GfxScratchBuffer coverScratchStorage;
   // Making the covers the page on screen lacks. The render task flags a cell drawn without its
-  // thumbnail; loop() then works through that page's books one at a time in short bursts, in the
-  // borrowed secondary framebuffer as the Home carousel does, and redraws as each cover lands.
+  // thumbnail; loop() then works through that page's books one at a time in short bursts and
+  // redraws as each cover lands.
   std::unique_ptr<CoverThumbLoader> coverLoader;
   std::atomic<bool> coverWork{false};
   // Books whose cover failed during this visit: not retried until the browser is entered again.

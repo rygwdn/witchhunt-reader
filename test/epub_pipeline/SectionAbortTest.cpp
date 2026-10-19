@@ -15,11 +15,15 @@
 // `!reusedHtml` condition and passes on `!extractDone`.
 #include <Arduino.h>
 #include <GlyphProvider.h>
+#include <array>
+#include <cstddef>
+#include <cstdint>
 #include <gtest/gtest.h>
 
 #include <filesystem>
 #include <string>
 
+#include "BuildArena.h"
 #include "Epub.h"
 #include "Epub/Section.h"
 #include "GfxRenderer.h"
@@ -159,3 +163,68 @@ TEST(SectionAbort, ABuildThatMeasuredAGlyphWithoutMemoryIsNotKept) {
   EXPECT_TRUE(section.loadSectionFile(defaultParams()));
   EXPECT_GT(section.pageCount, 0);
 }
+
+// Detaching caller-owned scratch must synchronously tear down a build that is using it. Callers
+// release the backing region immediately after this setter returns (e.g. when returning a lent
+// framebuffer), so continue using the Section after the region has left scope. A completed HTML
+// extract must remain banked so the retry can resume without inflating it again.
+TEST(SectionAbort, DetachingExternalScratchAbortsBeforeReleaseAndPreservesRetryState) {
+  const std::string cacheDir = freshCacheDir("detach_external_scratch");
+  const std::string epubPath = std::string(CORPUS_DIR) + "/test_tables.epub";
+
+  GfxRenderer renderer;
+  auto epub = std::make_shared<Epub>(epubPath, cacheDir);
+  ASSERT_TRUE(epub->load(true));
+  size_t inflatedSize = 0;
+  ASSERT_TRUE(epub->getSpineItemInflatedSize(kSpineIndex, &inflatedSize));
+  ASSERT_GT(inflatedSize, 0u);
+
+  Section section(epub, kSpineIndex, renderer);
+  const Section::BuildParams p = defaultParams();
+  const std::string html = htmlCachePath(*epub);
+  const host_clock::Ticking tick(1);
+
+  {
+    // Keep this external backing region genuinely caller-scoped: after detaching, both the arena
+    // and its storage die while Section remains alive and is used again below.
+    alignas(std::max_align_t) std::array<uint8_t, 64 * 1024> storage{};
+    BuildArena arena(storage.data(), storage.size());
+    ASSERT_TRUE(arena.valid());
+    section.setExternalBuildScratch(&arena);
+
+    bool extractComplete = false;
+    for (int i = 0; i < 20000; ++i) {
+      const Section::BuildStep step = section.stepSectionBuild(p, /*budgetMs=*/1);
+      if (section.hasActiveBuild() && fs::exists(html) && fs::file_size(html) == inflatedSize) {
+        extractComplete = true;
+        break;
+      }
+      if (step == Section::BuildStep::Done || step == Section::BuildStep::Failed) break;
+    }
+    EXPECT_TRUE(extractComplete) << "the fixture did not reach a live build with complete extracted HTML";
+    EXPECT_TRUE(section.hasActiveBuild());
+
+    section.setExternalBuildScratch(&arena);  // Re-setting the current arena is a no-op.
+    EXPECT_TRUE(section.hasActiveBuild());
+    section.setExternalBuildScratch(nullptr);
+
+    EXPECT_FALSE(section.hasActiveBuild())
+        << "the caller may release its arena immediately after detaching it";
+    EXPECT_TRUE(fs::exists(html));
+    EXPECT_EQ(fs::file_size(html), inflatedSize)
+        << "detaching discarded the completed extract needed by the retry";
+  }
+
+  ASSERT_FALSE(section.hasActiveBuild());
+
+  // The caller's scratch is now gone. A resumed build must safely use the Section and its retained
+  // HTML cache rather than dereference the detached arena or repeat phase (a).
+  Section::BuildStep result = Section::BuildStep::More;
+  for (int i = 0; i < 20000 && result == Section::BuildStep::More; ++i) {
+    result = section.stepSectionBuild(p, /*budgetMs=*/1);
+  }
+  EXPECT_EQ(result, Section::BuildStep::Done) << "retry failed after releasing detached scratch";
+  EXPECT_TRUE(fs::exists(html));
+  EXPECT_EQ(fs::file_size(html), inflatedSize);
+}
+

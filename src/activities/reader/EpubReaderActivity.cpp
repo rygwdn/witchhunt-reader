@@ -31,6 +31,7 @@
 #include <HalClock.h>
 #include <HalPowerManager.h>
 #include <HalStorage.h>
+#include <HeapPools.h>
 #include <I18n.h>
 #include <Logging.h>
 #include <SdCardFont.h>
@@ -211,6 +212,13 @@ constexpr uint32_t LARGEST_FREE_BLOCK_SLACK = 16;
 // heap -- well under the layout peak the free floor above is derived from. Kept as a knob.
 #ifndef BG_BUILD_RESOLVE_EXTRA_HEAP_BYTES
 #define BG_BUILD_RESOLVE_EXTRA_HEAP_BYTES 0
+#endif
+#ifndef PSRAM_BUILD_SCRATCH_BYTES
+#define PSRAM_BUILD_SCRATCH_BYTES (52 * 1024)
+#endif
+#if defined(BOARD_HAS_PSRAM) && BOARD_HAS_PSRAM
+// Size of the dedicated external scratch region; framebuffer loans retain their actual capacity.
+// 10,240 parse + 8,192 extract + 32,768 inflate + 2 KiB headroom = 52 KiB.
 #endif
 
 // Quiet period after the last page reached the screen before B may take the buffer. B's borrow
@@ -555,19 +563,12 @@ uint32_t g_lastHeapWatermark = 0;
 // an 8.4 MB total -- noise at ERROR level, several lines per page turn, in a
 // diagnostic whose entire job is to make a real dip stand out.
 //
-// Internal RAM is the pool under pressure there (DMA buffers, task stacks, and
-// everything under the 4 KB CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL threshold), and
-// it is what the periodic [MEM] line already reports as `internal=`. So watch
-// that instead. On a board without PSRAM the two are the same pool and the C3
-// behaviour is unchanged -- which is the point: this narrows the question to the
-// scarce resource rather than muting the alarm.
-uint32_t scarceHeapWatermark() {
-#if defined(BOARD_HAS_PSRAM) && BOARD_HAS_PSRAM
-  return heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
-#else
-  return esp_get_minimum_free_heap_size();
-#endif
-}
+// Internal RAM is the pool under pressure there (DMA buffers, task stacks, and ordinary
+// malloc/new allocations); explicitly external buffers are excluded. The periodic [MEM] line
+// already reports this pool as `internal=`. Without PSRAM, the two are the same pool and the C3
+// behaviour is unchanged — which is the point: this narrows the question to the scarce resource
+// rather than muting the alarm.
+uint32_t scarceHeapWatermark() { return internalMinEverFreeBytes(); }
 
 void noteHeapWatermark(const char* stage) {
   const uint32_t mark = scarceHeapWatermark();
@@ -928,12 +929,16 @@ void EpubReaderActivity::onExit() {
   // epub it references goes away.
   resetBackgroundBuild();
   section.reset();  // also aborts an in-flight Background-C build of the current section
+  // Background-C may have been building in the external arena instead (PSRAM boards): detach it
+  // and hand the 52 KB block back to the external pool — the next reader session re-acquires it
+  // on first use. Nothing to restore display-side; the framebuffer never left.
+  releasePsramBuildScratch(nullptr);  // `section` is already gone
   // Background-C may have BORROWED the secondary buffer for headroom (lent, not freed); the
   // build is now aborted (section.reset above released into the arena), so hand the block back.
   // The return cannot fail — the region never entered the heap.
   if (secondaryBorrowed_) {
     buildScratch_.reset();
-    renderer.returnSecondaryBuffer();
+    buildScratchStorage_.release();
     secondaryBorrowed_ = false;
     secondaryBufferDegraded_ = false;
     LOG_INF("ERS", "onExit: returned secondary buffer borrowed by Background-C");
@@ -949,6 +954,10 @@ void EpubReaderActivity::onExit() {
     }
     secondaryBufferDegraded_ = false;
   }
+#if defined(BOARD_HAS_PSRAM) && BOARD_HAS_PSRAM
+  buildScratchStorage_.reset();
+  imageScratchStorage_.reset();
+#endif
   // Restore the display-global single-buffer fast-diff flag unconditionally. Background-C
   // (buildSection) sets it true alongside its release; the two designed restore sites
   // (recoverSecondaryBufferIfNeeded, compileSectionCache) clear it, but exiting mid-build
@@ -1536,8 +1545,55 @@ void EpubReaderActivity::resumeBackgroundWork() {
   LOG_INF("ERS", "Background work resumed");
 }
 
+bool EpubReaderActivity::acquirePsramBuildScratch(Section* target) {
+#if defined(BOARD_HAS_PSRAM) && BOARD_HAS_PSRAM
+  if (!target || psramScratchLent_ || secondaryBorrowed_) {
+    return false;  // one arena per build, and never two arenas over one region
+  }
+  const bool hadStorage = buildScratchStorage_.hasDedicatedBacking();
+  uint8_t* storage =
+      buildScratchStorage_.acquire(renderer, PSRAM_BUILD_SCRATCH_BYTES, GfxScratchBuffer::Policy::DedicatedOnly);
+  if (!storage) {
+    LOG_ERR("ERS", "PSRAM build scratch alloc failed (%u bytes); falling back to the framebuffer path",
+            static_cast<unsigned>(PSRAM_BUILD_SCRATCH_BYTES));
+    return false;
+  }
+  if (!hadStorage) {
+    LOG_INF("ERS", "PSRAM build scratch allocated: %u bytes (psramFree=%lu)",
+            static_cast<unsigned>(PSRAM_BUILD_SCRATCH_BYTES),
+            static_cast<unsigned long>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
+  }
+  buildScratch_ = makeUniqueNoThrow<BuildArena>(storage, buildScratchStorage_.capacity());
+  if (!buildScratch_ || !buildScratch_->valid()) {
+    buildScratch_.reset();
+    buildScratchStorage_.release();
+    return false;
+  }
+  target->setExternalBuildScratch(buildScratch_.get());
+  psramScratchLent_ = true;
+  return true;
+#else
+  (void)target;
+  return false;  // no external pool to spend; every caller keeps its pre-PSRAM path
+#endif
+}
+
+void EpubReaderActivity::releasePsramBuildScratch(Section* holder) {
+  if (!psramScratchLent_) {
+    return;  // always the case on a board without PSRAM
+  }
+  if (holder) holder->setExternalBuildScratch(nullptr);
+  buildScratch_.reset();
+  buildScratchStorage_.release();  // retain the external block for the next build
+  psramScratchLent_ = false;
+  backgroundPsramScratchActive_ = false;
+}
+
 void EpubReaderActivity::resetBackgroundBuild() {
-  endBackgroundBorrow();       // returns the lent buffer (and aborts the build) if B held it
+  endBackgroundBorrow();  // returns the lent buffer (and aborts the build) if B held it
+  // Only when B still owns it: after the buildSection() adoption the arena belongs to C and its
+  // build is live inside it, and resetBackgroundBuild() runs on exactly that path.
+  if (backgroundPsramScratchActive_) releasePsramBuildScratch(backgroundSection_.get());
   backgroundSection_.reset();  // ~Section aborts a partial build and deletes its partial file
   backgroundBuildSpineIndex_ = -1;
   backgroundBuildNeedsResolve_ = false;
@@ -1553,36 +1609,38 @@ bool EpubReaderActivity::beginBackgroundBorrow() {
   if (backgroundBorrowActive_ || secondaryBorrowed_ || !backgroundSection_) {
     return false;  // already lent (to B or to C) — never two arenas over one region
   }
-  size_t borrowedSize = 0;
-  uint8_t* borrowed = renderer.borrowSecondaryBuffer(&borrowedSize);
+#if defined(BOARD_HAS_PSRAM) && BOARD_HAS_PSRAM
+  // Preferred on PSRAM boards: build out of external RAM and leave the framebuffer alone. The
+  // borrow's entire cost — AA off, forced FULL_REFRESH, and a parse discarded by the next page
+  // turn — exists only because the framebuffer is display state that the reader needs back.
+  // An external arena is nobody's display state, so B can hold it across page turns and
+  // actually finish the spine (docs/psram-utilization-audit-2026-09-17.md P0.2).
+  if (acquirePsramBuildScratch(backgroundSection_.get())) {
+    backgroundPsramScratchActive_ = true;
+    LOG_INF("ERS", "Background-B: building spine %d in the PSRAM arena (%u bytes, internalFree=%lu contig=%lu)",
+            backgroundBuildSpineIndex_, static_cast<unsigned>(PSRAM_BUILD_SCRATCH_BYTES),
+            static_cast<unsigned long>(internalFreeBytes()), static_cast<unsigned long>(internalContigBytes()));
+    return true;
+  }
+#endif
+  uint8_t* borrowed =
+      buildScratchStorage_.acquire(renderer, PSRAM_BUILD_SCRATCH_BYTES, GfxScratchBuffer::Policy::BorrowOnly);
   if (!borrowed) {
     return false;  // no secondary buffer to lend (X3 baseline, or already released for a C build)
   }
+  const size_t borrowedSize = buildScratchStorage_.capacity();
   buildScratch_ = makeUniqueNoThrow<BuildArena>(borrowed, borrowedSize);
   if (!buildScratch_ || !buildScratch_->valid()) {
     buildScratch_.reset();
-    renderer.returnSecondaryBuffer();  // cannot fail: the region never entered the heap
+    buildScratchStorage_.release();
     return false;
   }
   backgroundSection_->setExternalBuildScratch(buildScratch_.get());
   secondaryBorrowed_ = true;
   backgroundBorrowActive_ = true;
-  // Mark AA unavailable while the block is away (renderContents gates on this as well as on
-  // hasSecondaryBuffer). Unlike the Background-C borrow this deliberately does NOT seed RED RAM
-  // or opt in to single-buffer fast differential:
-  //  - No refresh can happen during B's borrow. Every render calls recoverSecondaryBufferIfNeeded()
-  //    first, which hands the block back before the pass draws — so the single-buffer display
-  //    path would never be exercised, and if one ever did slip through, an un-opted-in FAST
-  //    downgrades to HALF (slow, correct) instead of ghosting against a bogus baseline.
-  //  - syncRedRamFromFrameBuffer() would be actively wrong here. C borrows right after drawing
-  //    its popup, so frameBuffer is what's on screen. B borrows during quiet reading, when a
-  //    completed Background-A pre-render usually leaves the NEXT page in frameBuffer — seeding
-  //    RED RAM from that makes the next page turn diff against the frame it is about to draw
-  //    and leaves the page visibly unchanged.
+  // Mark AA unavailable while the block is away. B does not refresh during its borrow and yields
+  // it back before a render, so no single-buffer fast-diff opt-in or RED-RAM seeding is needed.
   secondaryBufferDegraded_ = true;
-  // What this build will really cost: the heap's low point while it holds the buffer, read back
-  // in endBackgroundBorrow(). The allocator tracks it from here (it is a global setting, so the
-  // [MEM] ticks' "Min Free" shows the same local low until the buffer goes back).
   backgroundBorrowFreeAtStart_ = static_cast<uint32_t>(esp_get_free_heap_size());
   backgroundHeapLowTracked_ = heap_caps_monitor_local_minimum_free_size_start() == ESP_OK;
   LOG_INF("ERS", "Background-B: borrowed secondary buffer for spine %d build (%u bytes, free=%lu contig=%lu)",
@@ -1611,7 +1669,7 @@ void EpubReaderActivity::endBackgroundBorrow(const bool preemption) {
     }
   }
   buildScratch_.reset();
-  renderer.returnSecondaryBuffer();  // cannot fail: the region never entered the heap
+  buildScratchStorage_.release();
   backgroundBorrowActive_ = false;
   backgroundBuildThrough_ = false;
   secondaryBorrowed_ = false;
@@ -1690,7 +1748,7 @@ void EpubReaderActivity::stepBackgroundSectionBuild() {
   // arming here then made that render a PreRender pass, which draws the page after the new one
   // off-screen and never flushes — the panel stayed on the old page (issue #351). The render that
   // draws the new page arms its own pre-render.
-  const uint32_t preRenderFree = esp_get_free_heap_size();
+  const uint32_t preRenderFree = internalFreeBytes();
   // Everything except the heap floor, so the floor can be reported on its own. Pre-render is a
   // nice-to-have (page-turn latency), not correctness — but a floor that rejects it constantly is
   // still evidence the floors are mistuned.
@@ -1866,9 +1924,8 @@ void EpubReaderActivity::stepBackgroundSectionBuild() {
         return;
       }
       if (!inputQueued && (buildThrough || (now - lastActivityMs) >= BG_BUILD_BORROW_QUIET_MS) &&
-          esp_get_free_heap_size() >= borrowFreeFloor &&
-          heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_DEFAULT) >=
-              BG_BUILD_BORROW_MIN_CONTIG_HEAP_BYTES - LARGEST_FREE_BLOCK_SLACK &&
+          internalFreeBytes() >= borrowFreeFloor &&
+          internalContigBytes() >= BG_BUILD_BORROW_MIN_CONTIG_HEAP_BYTES - LARGEST_FREE_BLOCK_SLACK &&
           beginBackgroundBorrow()) {
         backgroundBuildThrough_ = buildThrough;
         if (buildThrough) {
@@ -1921,6 +1978,7 @@ void EpubReaderActivity::stepBackgroundSectionBuild() {
       }
       checkHeapIntegrity("after_b_slice");
       if (step == Section::BuildStep::More) {
+
         // Heap can drop after the WaitHeap gate passed (an interleaved page render allocates).
         // The moment the CSS resolver starts skipping lookups the result is doomed to be
         // css-degraded and discarded — bail now instead of grinding through the rest of the
@@ -1930,7 +1988,8 @@ void EpubReaderActivity::stepBackgroundSectionBuild() {
                   targetSpine);
           backgroundSection_->abortSectionBuild();
           backgroundSection_.reset();
-          endBackgroundBorrow();  // no build left to discard; just hands the block back
+          endBackgroundBorrow();              // no build left to discard; just hands the block back
+          releasePsramBuildScratch(nullptr);  // section already gone; just drop the arena view
           backgroundBuildPercent_ = -1;
           backgroundBuildState_ = BackgroundBuildState::Settled;
           return;
@@ -2006,6 +2065,7 @@ void EpubReaderActivity::stepBackgroundSectionBuild() {
       if (buildScratch_) buildScratch_->reset();
       epub->persistImageManifest(buildScratch_.get());
       endBackgroundBorrow();
+      releasePsramBuildScratch(backgroundSection_.get());
       backgroundBuildState_ = BackgroundBuildState::Settled;
       return;
     }
@@ -2015,6 +2075,7 @@ void EpubReaderActivity::stepBackgroundSectionBuild() {
 LaneBeforeBuild::Window EpubReaderActivity::stepImageWarmLocked() {
   using LaneBeforeBuild::Window;
   if (!section || section->hasActiveBuild() || section->pageCount == 0) return Window::Closed;
+  if (imageScratchStorage_.isAcquired()) return Window::Closed;
   // Background-C's borrow, or no buffer at all, closes the lane. B's does not: the lane takes the buffer back from B
   // for a decode while B has yields left (LaneBeforeBuild), and waits for B's build once it has none.
   if (backgroundBorrowActive_) {
@@ -2126,9 +2187,16 @@ bool EpubReaderActivity::warmPageForImageLane(const Page& page, const int spine,
   const int viewportHeight = std::max(0, renderer.getScreenHeight() - layout.marginTop - layout.marginBottom);
   const int contentTop = layout.marginTop + getImageOnlyPageYOffset(page, viewportHeight);
 
-  LentSecondary lend(renderer);
-  BuildArena* const arena = lend.arena();
-  if (!arena) return false;
+  uint8_t* scratchBuffer =
+      imageScratchStorage_.acquire(renderer, PSRAM_BUILD_SCRATCH_BYTES, GfxScratchBuffer::Policy::PreferDedicated);
+  if (!scratchBuffer) return false;
+  auto scratch = makeUniqueNoThrow<BuildArena>(scratchBuffer, imageScratchStorage_.capacity());
+  if (!scratch || !scratch->valid()) {
+    scratch.reset();
+    imageScratchStorage_.release();
+    return false;
+  }
+  BuildArena* const arena = scratch.get();
   const unsigned long t0 = millis();
   imageProcessingActive_ = true;
   CooperativeAbort::clearAborted();
@@ -2143,7 +2211,8 @@ bool EpubReaderActivity::warmPageForImageLane(const Page& page, const int spine,
   // Preempted by input: not a failure, the next quiet moment retries.
   const bool preempted = CooperativeAbort::consumeAborted();
   imageProcessingActive_ = false;
-  lend.giveBack();
+  scratch.reset();
+  imageScratchStorage_.release();
   if (finishLadder(ladder)) return true;
 
   const bool complete = !page.hasUncachedImages(true, true, warmGrayscale);
@@ -2417,13 +2486,18 @@ void EpubReaderActivity::stepCurrentSectionBuild() {
     // clean flag state; compileSectionCache re-establishes release/degraded/fast-diff as needed.
     if (secondaryBorrowed_) {
       buildScratch_.reset();
-      renderer.returnSecondaryBuffer();
+      buildScratchStorage_.release();
       secondaryBorrowed_ = false;
       secondaryBufferDegraded_ = false;
       renderer.setSingleBufferFastDiff(false);
       LOG_INF("ERS", "Background-C spine=%d: returned borrowed secondary buffer before released rebuild",
               currentSpineIndex);
     }
+    // An arena-backed build that still failed did so heap-side (the arena's own shortfall is in
+    // the diagnostics above), so the rebuild takes the same released path it would have taken
+    // without PSRAM. `section` is already gone, so just drop the arena view; the external block
+    // stays for the next build.
+    releasePsramBuildScratch(nullptr);
     if (retryIncremental) {
       forceReleasedBuildSpine_ = currentSpineIndex;
     } else {
@@ -2460,11 +2534,14 @@ void EpubReaderActivity::stepCurrentSectionBuild() {
     // Proactive low-heap guard: while the build is resident (AA buffer kept), bail to the released
     // path before heap reaches the fault zone. Only meaningful when the buffer is still resident —
     // a build already running released has that headroom and should ride it out.
-    const uint32_t residentFree = esp_get_free_heap_size();
-    const uint32_t residentContig = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_DEFAULT);
+    const uint32_t residentFree = internalFreeBytes();
+    const uint32_t residentContig = internalContigBytes();
     constexpr uint32_t residentAbortContigFloor = RESIDENT_BUILD_ABORT_CONTIG_HEAP_BYTES - LARGEST_FREE_BLOCK_SLACK;
-    const bool residentAbort = !secondaryBufferDegraded_ && (residentFree < RESIDENT_BUILD_ABORT_FREE_HEAP_BYTES ||
-                                                             residentContig < residentAbortContigFloor);
+    // A PSRAM-arena build is not competing for the internal heap either (its parse working set,
+    // ring and CSS index are all external), so the guard does not apply to it.
+    const bool residentAbort = !secondaryBufferDegraded_ && !psramScratchLent_ &&
+                               (residentFree < RESIDENT_BUILD_ABORT_FREE_HEAP_BYTES ||
+                                residentContig < residentAbortContigFloor);
     if (residentAbort) {
       HEAP_GATE("residentAbort", false, residentFree, RESIDENT_BUILD_ABORT_FREE_HEAP_BYTES, residentContig,
                 residentAbortContigFloor);
@@ -3703,7 +3780,8 @@ bool EpubReaderActivity::stepPageStateLocked(const bool isForwardTurn) {
   // NOTE: section changes served from cache or a completed Background-B build never release
   // the secondary buffer, so RED RAM baseline is intact and the first page uses a normal fast refresh.
   // When the secondary buffer IS released+reallocated (indexing path, image-warm pass, OOM recovery),
-  // the release site immediately calls syncRedRamFromFrameBuffer() to restore the correct baseline.
+  // the release site seeds RED RAM *before* releasing, and the realloc arms the driver's one-shot so
+  // the first FAST after it diffs against the controller's retained RED plane.
   if (isForwardTurn) {
     if (hasPages && section->currentPage < section->pageCount - 1) {
       section->currentPage++;
@@ -4003,6 +4081,11 @@ void EpubReaderActivity::recoverSecondaryBufferIfNeeded() {
   if (section && section->hasActiveBuild()) {
     return;
   }
+  // Past that guard no build is live, so an external arena still lent has served its purpose:
+  // detach it (the block stays allocated for the next build) so the next section's build-mode
+  // decision and the font-slot arena see the real state. Nothing display-side to restore — an
+  // arena build never took the framebuffer. No-op when nothing is lent.
+  releasePsramBuildScratch(section.get());
   // Borrowed-buffer path: the build ran inside the LENT secondary framebuffer, so return it
   // instead of reallocating. The region never entered the heap, so returnSecondaryBuffer()
   // cannot fail — no realloc/eviction/forensics/heap-recovery needed here. Drop the section's
@@ -4011,7 +4094,7 @@ void EpubReaderActivity::recoverSecondaryBufferIfNeeded() {
   if (secondaryBorrowed_ && !renderer.hasSecondaryBuffer()) {
     if (section) section->setExternalBuildScratch(nullptr);
     buildScratch_.reset();
-    renderer.returnSecondaryBuffer();
+    buildScratchStorage_.release();
     secondaryBorrowed_ = false;
     secondaryBufferDegraded_ = false;
     renderer.setSingleBufferFastDiff(false);
@@ -4028,16 +4111,16 @@ void EpubReaderActivity::recoverSecondaryBufferIfNeeded() {
       // otherwise leave RED RAM reseeding skipped on the normal path. No-op if it was never set
       // (e.g. recovering from an indexing OOM instead of a released build).
       renderer.setSingleBufferFastDiff(false);
-      // Do NOT syncRedRamFromFrameBuffer() here: reallocSecondaryBuffer() whitened the new secondary,
-      // and syncRedRamFromFrameBuffer() would copy that white into RED RAM, destroying the baseline.
-      // RED already holds the last displayed page (kept current by the released build's FAST refreshes;
-      // the controller retains it through realloc). Reseeding from white ghosted the next page.
+      // Do NOT syncRedRamFromFrameBuffer() here: reallocSecondaryBuffer() seeds the new secondary
+      // with a best-effort copy of the live primary and arms _redBaselineAuthoritative, which makes
+      // the next FAST diff against the controller's retained RED instead. Pushing that unproven copy
+      // into RED is what ghosted the next page (FreeInkDisplay.cpp:480-499).
       LOG_INF("ERS", "Secondary display buffer restored; re-enabling normal refresh/AA paths");
     } else {
-      const uint32_t freeHeap = esp_get_free_heap_size();
+      const uint32_t freeHeap = internalFreeBytes();
       // Safe to walk the heap here (unlike the post-index OOM path): this is a routine
       // render-start recovery, not the aftermath of decode failures under pressure.
-      const uint32_t contigHeap = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_DEFAULT);
+      const uint32_t contigHeap = internalContigBytes();
       LOG_ERR("ERS", "Secondary display buffer realloc failed (free=%lu contig=%lu); AA stays off, will retry",
               freeHeap, contigHeap);
       // One-shot forensics so field logs identify WHAT is pinning the released hole. Once per
@@ -4237,7 +4320,7 @@ void EpubReaderActivity::renderPreRenderPass(const RenderLayout& layout) {
             buildActive ? 1 : 0);
     return;
   }
-  const uint32_t freeHeap = esp_get_free_heap_size();
+  const uint32_t freeHeap = internalFreeBytes();
   // Optimistic for a page that turns out to draw scaled text: checked again once it is loaded.
   const uint32_t preRenderFloor = preRenderMinFreeHeap(inkOnlyPrerenderAvailable());
   if (freeHeap < preRenderFloor) {
@@ -4409,8 +4492,8 @@ bool EpubReaderActivity::heapAllowsInPlaceBuild(const bool embeddedStyle, const 
                                                                 : IN_PLACE_BUILD_MIN_CONTIG_HEAP_BYTES,
                                                   ringBytes + 8 * 1024) -
                                LARGEST_FREE_BLOCK_SLACK;
-  const uint32_t freeHeap = esp_get_free_heap_size();
-  const uint32_t contigHeap = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_DEFAULT);
+  const uint32_t freeHeap = internalFreeBytes();
+  const uint32_t contigHeap = internalContigBytes();
   const bool ok = freeHeap >= freeFloor && contigHeap >= contigFloor;
   // One line per gate evaluation: the resident/released choice and the exact heap-vs-floor
   // arithmetic behind it. This is the first thing to check when a section build takes the wrong
@@ -4434,6 +4517,9 @@ EpubReaderActivity::SectionBuildMode EpubReaderActivity::chooseSectionBuildMode(
   // behind the popup while a perfectly good partial build sits in the arena. Released is what the
   // borrow already implements (single-buffer display semantics, headroom in the lent block).
   if (secondaryBorrowed_) return SectionBuildMode::IncrementalReleased;
+  // The adopted build is already running in the EXTERNAL arena, so the framebuffer was never
+  // taken: keep it resident (AA live, fast-diff baseline intact) and let C carry the build on.
+  if (psramScratchLent_) return SectionBuildMode::IncrementalResident;
   // No secondary buffer to keep or release (already degraded): blocking path reallocs it at the end.
   if (!renderer.hasSecondaryBuffer()) return SectionBuildMode::Blocking;
   // A resident build that aborted on the low-heap guard retries released but still INCREMENTAL:
@@ -4520,43 +4606,44 @@ EpubReaderActivity::BuildOutcome EpubReaderActivity::compileSectionCache(const R
   // <8 KB min free). (2) Nothing to lend: no secondary buffer, or one already lent elsewhere.
   // A borrowed build that fails escalates to a released rebuild the same way (below).
   bool released = false;
-  bool borrowedHere = false;  // lent by THIS call, handed back before it returns
+  bool scratchAcquiredHere = false;
   size_t inflatedSize = 0;
   epub->getSpineItemInflatedSize(currentSpineIndex, &inflatedSize);
   const bool escalated = forceBlockingBuildSpine_ == currentSpineIndex;
   const bool inPlace = renderer.fastRefreshNeedsHostFrame() && renderer.hasSecondaryBuffer() && !escalated &&
                        heapAllowsInPlaceBuild(embeddedStyle, inflatedSize);
-  const auto lendSecondaryBuffer = [&]() {
-    size_t borrowedSize = 0;
-    uint8_t* borrowed = renderer.borrowSecondaryBuffer(&borrowedSize);
-    if (!borrowed) return false;
-    buildScratch_ = makeUniqueNoThrow<BuildArena>(borrowed, borrowedSize);
+  const auto acquireBuildScratch = [&]() {
+    if (buildScratchStorage_.isAcquired() || psramScratchLent_ || secondaryBorrowed_) return false;
+    uint8_t* storage = buildScratchStorage_.acquire(renderer, PSRAM_BUILD_SCRATCH_BYTES);
+    if (!storage) return false;
+    buildScratch_ = makeUniqueNoThrow<BuildArena>(storage, buildScratchStorage_.capacity());
     if (!buildScratch_ || !buildScratch_->valid()) {
       buildScratch_.reset();
-      renderer.returnSecondaryBuffer();
+      buildScratchStorage_.release();
       return false;
     }
     section->setExternalBuildScratch(buildScratch_.get());
-    secondaryBorrowed_ = true;
-    secondaryBufferDegraded_ = true;  // AA needs a resident buffer; nothing renders until it is back
-    borrowedHere = true;
+    secondaryBorrowed_ = buildScratchStorage_.isBorrowed();
+    psramScratchLent_ = buildScratchStorage_.isDedicated();
+    secondaryBufferDegraded_ = secondaryBorrowed_;
+    scratchAcquiredHere = true;
     return true;
   };
-  // Hand a borrow taken above back to the display. The return cannot fail; it re-seeds the
-  // baseline exactly like a realloc does.
-  const auto handBackBorrow = [&]() {
+  const auto handBackScratch = [&]() {
     section->setExternalBuildScratch(nullptr);
     buildScratch_.reset();
-    renderer.returnSecondaryBuffer();
+    buildScratchStorage_.release();
     secondaryBorrowed_ = false;
+    psramScratchLent_ = false;
     secondaryBufferDegraded_ = false;
-    borrowedHere = false;
+    scratchAcquiredHere = false;
   };
   if (inPlace) {
     LOG_INF("ERS", "Building section in place (secondary buffer kept): free=%lu contig=%lu", esp_get_free_heap_size(),
             heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_DEFAULT));
-  } else if (!escalated && !secondaryBorrowed_ && renderer.hasSecondaryBuffer() && lendSecondaryBuffer()) {
-    LOG_INF("ERS", "Index start mem (secondary buffer BORROWED as the build arena, %u bytes): free=%lu contig=%lu",
+  } else if (!escalated && acquireBuildScratch()) {
+    LOG_INF("ERS", "Index start mem (%s %u-byte build arena): free=%lu contig=%lu",
+            secondaryBorrowed_ ? "borrowed secondary buffer" : "dedicated PSRAM",
             static_cast<unsigned>(buildScratch_->capacity()), esp_get_free_heap_size(),
             static_cast<unsigned long>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_DEFAULT)));
   } else {
@@ -4596,25 +4683,21 @@ EpubReaderActivity::BuildOutcome EpubReaderActivity::compileSectionCache(const R
             esp_get_free_heap_size());
     checkHeapIntegrity("after_createSectionFile_retry");
   }
-  if (!createOk && borrowedHere) {
-    // The borrowed build failed. Say whether the REGION or the heap ran out (failedAllocSize is
-    // the last refused arena size; highWater only counts successes), then escalate exactly as
-    // Background-C does: hand the block back and rebuild released, with the heap 52 KB bigger.
-    LOG_ERR("ERS",
-            "Borrowed blocking build spine=%d failed: arena highWater=%u/%u failedAlloc=%u releaseFails=%lu "
-            "free=%lu -- retrying released",
-            currentSpineIndex, static_cast<uint32_t>(buildScratch_->highWater()),
-            static_cast<uint32_t>(buildScratch_->capacity()), static_cast<uint32_t>(buildScratch_->failedAllocSize()),
+  if (!createOk && scratchAcquiredHere) {
+    const bool wasBorrowed = buildScratchStorage_.isBorrowed();
+    LOG_ERR("ERS", "%s blocking build spine=%d failed: arena highWater=%u/%u failedAlloc=%u releaseFails=%lu free=%lu",
+            wasBorrowed ? "Borrowed" : "Dedicated", currentSpineIndex,
+            static_cast<uint32_t>(buildScratch_->highWater()), static_cast<uint32_t>(buildScratch_->capacity()),
+            static_cast<uint32_t>(buildScratch_->failedAllocSize()),
             static_cast<unsigned long>(buildScratch_->releaseFailures()),
             static_cast<unsigned long>(esp_get_free_heap_size()));
-    handBackBorrow();
-    renderer.releaseSecondaryBuffer();
-    released = true;
+    handBackScratch();
+    if (wasBorrowed && renderer.releaseSecondaryBuffer()) released = true;
     const uint32_t retryStart = millis();
     createOk = runCreate();
-    LOG_INF("ERS", "createSectionFile released retry returned %d in %ums (free=%lu)", createOk ? 1 : 0,
+    LOG_INF("ERS", "createSectionFile scratch retry returned %d in %ums (free=%lu)", createOk ? 1 : 0,
             millis() - retryStart, esp_get_free_heap_size());
-    checkHeapIntegrity("after_createSectionFile_released_retry");
+    checkHeapIntegrity("after_createSectionFile_scratch_retry");
   }
 
   // An image dropped to alt text because its header walk was deferred (#249) is resolved now.
@@ -4635,12 +4718,11 @@ EpubReaderActivity::BuildOutcome EpubReaderActivity::compileSectionCache(const R
             section->isTableRowDegraded() ? "table-row-demoted" : "");
   }
   if (createOk && section->isImageHeaderDegraded()) {
-    // A borrowed build's region is idle now (its build state is gone): walk from it directly,
-    // as Background-C does at its end. Nothing below can offer more room than that.
-    if (borrowedHere) buildScratch_->reset();
-    bool imagesResolved = epub->persistImageManifest(borrowedHere ? buildScratch_.get() : nullptr);
+    // A scratch arena is idle after the build state ends; use it directly for the header walk.
+    if (scratchAcquiredHere) buildScratch_->reset();
+    bool imagesResolved = epub->persistImageManifest(scratchAcquiredHere ? buildScratch_.get() : nullptr);
     const EpubImageManifest* manifest = epub->getImageManifest();
-    if (manifest && manifest->hasPending() && !borrowedHere) {
+    if (manifest && manifest->hasPending() && !scratchAcquiredHere) {
       if (released) {
         if (renderer.reallocSecondaryBuffer()) {
           imagesResolved = resolvePendingImageHeadersFromFramebuffer() || imagesResolved;
@@ -4685,20 +4767,21 @@ EpubReaderActivity::BuildOutcome EpubReaderActivity::compileSectionCache(const R
   // leaves the buffer — and the baseline — untouched, so the first page uses a normal fast
   // refresh.
   const BuildOutcome outcome = createOk ? BuildOutcome::Built : BuildOutcome::Failed;
-  if (borrowedHere) {
-    handBackBorrow();
-    // Symmetric with the released path below: a prior IncrementalReleased build may have left
-    // single-buffer fast-diff opted in; clear it now that the double buffer is back. No RED-RAM
-    // sync here either -- the return re-seeded the baseline exactly as a realloc does.
-    renderer.setSingleBufferFastDiff(false);
-    LOG_INF("ERS", "Index end mem (after fb return): free=%lu contig=%lu", esp_get_free_heap_size(),
-            static_cast<unsigned long>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_DEFAULT)));
+  if (scratchAcquiredHere) {
+    const bool wasBorrowed = buildScratchStorage_.isBorrowed();
+    handBackScratch();
+    if (wasBorrowed) {
+      // The return re-seeds the framebuffer baseline; dedicated PSRAM never changed display state.
+      renderer.setSingleBufferFastDiff(false);
+      LOG_INF("ERS", "Index end mem (after framebuffer return): free=%lu contig=%lu", esp_get_free_heap_size(),
+              static_cast<unsigned long>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_DEFAULT)));
+    }
   }
   if (released) {
     if (!reallocSecondaryEvictingCaches()) {
       LOG_ERR("ERS", "Failed to reallocate secondary display buffer — display quality degraded");
       secondaryBufferDegraded_ = true;
-      const uint32_t freeAfterIndex = esp_get_free_heap_size();
+      const uint32_t freeAfterIndex = internalFreeBytes();
       // Do NOT call heap_caps_get_largest_free_block here: the heap may be corrupt after image
       // decode failures under pressure, and walking the TLSF free-block list on a corrupt heap
       // causes an interrupt WDT crash. Pass 0 for contigHeap — the restart heuristic treats 0 as
@@ -4726,10 +4809,10 @@ EpubReaderActivity::BuildOutcome EpubReaderActivity::compileSectionCache(const R
       // uses the normal host-reseeded baseline, not a stale controller-retained one. No-op if it was
       // never set.
       renderer.setSingleBufferFastDiff(false);
-      // Do NOT syncRedRamFromFrameBuffer() here: reallocSecondaryBuffer() whitened the new secondary,
-      // and syncRedRamFromFrameBuffer() would copy that white into RED RAM, destroying the baseline.
-      // RED already holds the frame displayed before the build (the popup); reseeding from white made
-      // the first page after the build diff against white and ghost.
+      // Do NOT syncRedRamFromFrameBuffer() here: reallocSecondaryBuffer() seeds the new secondary
+      // with a best-effort copy of the live primary — which at this point is the indexing popup or a
+      // cleared screen — and arms _redBaselineAuthoritative so the next FAST diffs against the
+      // controller's retained RED. Writing that copy into RED is what ghosted the first page.
       LOG_DBG("ERS", "Index end mem (after fb realloc): free=%lu", esp_get_free_heap_size());
     }
   }
@@ -4739,22 +4822,20 @@ EpubReaderActivity::BuildOutcome EpubReaderActivity::compileSectionCache(const R
 
 bool EpubReaderActivity::resolvePendingImageHeadersFromFramebuffer() {
   EpubImageManifest* manifest = epub ? epub->getImageManifest() : nullptr;
-  if (!manifest || !manifest->hasPending() || secondaryBorrowed_ || !renderer.hasSecondaryBuffer()) return false;
-  size_t size = 0;
-  uint8_t* borrowed = renderer.borrowSecondaryBuffer(&size);
-  if (!borrowed) return false;
+  if (!manifest || !manifest->hasPending() || secondaryBorrowed_ || imageScratchStorage_.isAcquired()) return false;
+  uint8_t* scratch = imageScratchStorage_.acquire(renderer, PSRAM_BUILD_SCRATCH_BYTES,
+                                                   GfxScratchBuffer::Policy::PreferDedicated);
+  if (!scratch) return false;
   bool resolved = false;
   {
-    // Scoped so the arena is gone before the buffer goes back (see the warm pass for the
-    // use-after-free this ordering prevents). The walk's ring is a scoped block inside it.
-    BuildArena arena(borrowed, size);
+    BuildArena arena(scratch, imageScratchStorage_.capacity());
     if (arena.valid()) {
       resolved = epub->persistImageManifest(&arena);
-      LOG_INF("ERS", "Image header walk from the framebuffer: resolved=%d, still pending=%d", resolved ? 1 : 0,
+      LOG_INF("ERS", "Image header walk from scratch: resolved=%d, still pending=%d", resolved ? 1 : 0,
               manifest->hasPending() ? 1 : 0);
     }
   }
-  renderer.returnSecondaryBuffer();  // cannot fail: the region never entered the heap
+  imageScratchStorage_.release();
   return resolved;
 }
 
@@ -4811,6 +4892,12 @@ bool EpubReaderActivity::buildSection(const RenderLayout& layout) {
       LOG_INF("ERS", "Background-B borrow transferred to Background-C for spine %d (heap %lu at start, %lu lowest)",
               currentSpineIndex, static_cast<unsigned long>(backgroundBorrowFreeAtStart_),
               static_cast<unsigned long>(lowWhileLent));
+    }
+    // Identical transfer for the external arena: clear only the B-owns-it flag, leave
+    // psramScratchLent_ and buildScratch_ pointing at the live build C has just adopted.
+    if (backgroundPsramScratchActive_) {
+      backgroundPsramScratchActive_ = false;
+      LOG_INF("ERS", "Background-B PSRAM arena transferred to Background-C for spine %d", currentSpineIndex);
     }
     LOG_INF("ERS", "Adopting background section for spine %d (%s)", currentSpineIndex, adoptKind);
   } else {
@@ -5009,26 +5096,37 @@ bool EpubReaderActivity::buildSection(const RenderLayout& layout) {
           LOG_INF("ERS", "Background-C: building spine %d incrementally, secondary buffer already BORROWED (free=%lu)",
                   currentSpineIndex, static_cast<unsigned long>(freeBefore));
         } else {
-          renderer.syncRedRamFromFrameBuffer();
-          // Prefer BORROWING the secondary buffer over freeing it: the lent block never enters
-          // the heap, so a survivor can't split it into a fragmented hole and the return cannot
-          // fail (the realloc-failure / heap-recovery-restart class of bugs is impossible). The
-          // build's arena bump-allocates inside the lent region instead of the heap. Fall back to
-          // the legacy release only when there is no secondary buffer to lend.
-          size_t borrowedSize = 0;
-          uint8_t* borrowed = renderer.borrowSecondaryBuffer(&borrowedSize);
-          if (borrowed) {
-            buildScratch_ = makeUniqueNoThrow<BuildArena>(borrowed, borrowedSize);
-            section->setExternalBuildScratch(buildScratch_ && buildScratch_->valid() ? buildScratch_.get() : nullptr);
-            secondaryBorrowed_ = true;
+          // Preferred on PSRAM boards (no-op elsewhere): take the external arena and leave the
+          // framebuffer resident. That keeps AA live and the double-buffer fast-diff baseline
+          // intact for every mid-build page, so none of the single-buffer handling below —
+          // RED-RAM seeding, the fast-diff opt-in, secondaryBufferDegraded_ and the FULL_REFRESH
+          // it forces — has to be armed at all. See docs/psram-utilization-audit-2026-09-17.md
+          // P0.2. `section` outlives the arena (buildScratch_ is destroyed after it).
+          if (acquirePsramBuildScratch(section.get())) {
+            LOG_INF("ERS", "Background-C: building spine %d incrementally in the PSRAM arena, buffer RESIDENT (%u B)",
+                    currentSpineIndex, static_cast<unsigned>(buildScratch_->capacity()));
           } else {
-            renderer.releaseSecondaryBuffer();
+            renderer.syncRedRamFromFrameBuffer();
+            // Prefer BORROWING the secondary buffer over freeing it: the lent block never enters
+            // the heap, so a survivor can't split it into a fragmented hole and the return cannot
+            // fail (the realloc-failure / heap-recovery-restart class of bugs is impossible). The
+            // build's arena bump-allocates inside the lent region instead of the heap. Fall back to
+            // the legacy release only when there is no secondary buffer to lend.
+            uint8_t* borrowed = buildScratchStorage_.acquire(
+                renderer, PSRAM_BUILD_SCRATCH_BYTES, GfxScratchBuffer::Policy::BorrowOnly);
+            if (borrowed) {
+              buildScratch_ = makeUniqueNoThrow<BuildArena>(borrowed, buildScratchStorage_.capacity());
+              if (buildScratch_ && buildScratch_->valid()) {
+                section->setExternalBuildScratch(buildScratch_.get());
+                secondaryBorrowed_ = true;
+              } else {
+                buildScratch_.reset();
+                buildScratchStorage_.release();
+                borrowed = nullptr;
+              }
+            }
+            if (!borrowed) renderer.releaseSecondaryBuffer();
           }
-          // Display semantics are identical to a released buffer (single-buffer mode either way).
-          renderer.setSingleBufferFastDiff(true);
-          secondaryBufferDegraded_ = true;
-          LOG_INF("ERS", "Background-C: building spine %d incrementally, secondary buffer %s (free %lu->%lu)",
-                  currentSpineIndex, borrowed ? "BORROWED" : "RELEASED", freeBefore, esp_get_free_heap_size());
         }
       } else {
         LOG_INF("ERS", "Background-C: building spine %d incrementally, buffer resident (free=%lu contig=%lu)",
@@ -5084,12 +5182,10 @@ bool EpubReaderActivity::buildSection(const RenderLayout& layout) {
         LOG_ERR("ERS", "Background-C kickoff failed for spine %d; using blocking path", currentSpineIndex);
         // The failed kickoff tore its build state down (releasing into the arena). If we borrowed
         // the secondary buffer above, hand it back before the blocking path: compileSectionCache
-        // manages a resident buffer (releases it for real heap), so it must start with the block
-        // back on the display. The return cannot fail — the region never entered the heap.
         if (secondaryBorrowed_) {
           section->setExternalBuildScratch(nullptr);
           buildScratch_.reset();
-          renderer.returnSecondaryBuffer();
+          buildScratchStorage_.release();
           secondaryBorrowed_ = false;
           secondaryBufferDegraded_ = false;
           renderer.setSingleBufferFastDiff(false);
@@ -5745,24 +5841,31 @@ void EpubReaderActivity::renderContents(RenderLock& lock, std::unique_ptr<Page> 
   // Release stays as the fallback for when there is nothing to lend (already released for a C
   // build, or no secondary buffer at all), so the previous behaviour is intact on those paths.
   // See docs/memory-allocation-strategy.md §9.3.
-  std::optional<LentSecondary> warmLend;
-  if (imageProcessingActive_ && renderer.hasSecondaryBuffer()) {
-    warmLend.emplace(renderer);
-    if (!warmLend->arena()) {
-      warmLend.reset();
+  std::unique_ptr<BuildArena> warmScratch;
+  if (imageProcessingActive_) {
+    uint8_t* scratchBuffer =
+        imageScratchStorage_.acquire(renderer, PSRAM_BUILD_SCRATCH_BYTES, GfxScratchBuffer::Policy::PreferDedicated);
+    if (scratchBuffer) {
+      warmScratch = makeUniqueNoThrow<BuildArena>(scratchBuffer, imageScratchStorage_.capacity());
+      if (!warmScratch || !warmScratch->valid()) {
+        warmScratch.reset();
+        imageScratchStorage_.release();
+      }
+    }
+    if (!warmScratch && renderer.hasSecondaryBuffer()) {
       renderer.releaseSecondaryBuffer();
       releasedSecondaryForWarm = true;
-      LOG_DBG("ERS", "Released secondary buffer for image warm pass (nothing to lend)");
+      LOG_DBG("ERS", "Released secondary buffer for image warm pass (scratch unavailable)");
     }
   }
-  BuildArena* const warmScratch = warmLend ? warmLend->arena() : nullptr;
+  BuildArena* const warmArena = warmScratch.get();
   ImageMemoryLadder::Action ladder = ImageMemoryLadder::Action::Done;
   if (imageProcessingActive_) {
     // Scoped so the arena is uninstalled before the borrow is returned below — a stale
     // image_scratch pointer into a region the display owns again would be a use-after-free.
-    image_scratch::ScopedArena warmScratchScope(warmScratch);
+    image_scratch::ScopedArena warmScratchScope(warmArena);
     ladder = warmImagesClimbingLadder(*page, orientedMarginLeft, contentTop, warmForceLoad, warmGrayscaleImageCache,
-                                      warmScratch, /*drawsPage=*/true);
+                                      warmArena, /*drawsPage=*/true);
   }
   // The borrow is returned after clearScreen() below, not here: returnSecondaryBuffer() seeds the
   // restored buffer from the live framebuffer, and right now that still holds the decode's
@@ -5779,7 +5882,7 @@ void EpubReaderActivity::renderContents(RenderLock& lock, std::unique_ptr<Page> 
     if (!reallocSecondaryEvictingCaches()) {
       LOG_ERR("ERS", "Failed to reallocate secondary buffer after image warm — display quality degraded");
       secondaryBufferDegraded_ = true;
-      const uint32_t freeAfterWarm = esp_get_free_heap_size();
+      const uint32_t freeAfterWarm = internalFreeBytes();
       // See the matching comment in compileSectionCache: do not walk the TLSF free-block
       // list here either, for the same post-decode-failure corruption risk.
       if (maybeRestartForFragmentedHeap(freeAfterWarm, 0)) {
@@ -5798,12 +5901,12 @@ void EpubReaderActivity::renderContents(RenderLock& lock, std::unique_ptr<Page> 
   }
   imageProcessingActive_ = false;
   renderer.clearScreen();
-  // Now that the framebuffer is clean, hand the block back. returnSecondaryBuffer() seeds the
-  // restored secondary from it and arms the one-shot RED baseline, exactly as
-  // reallocSecondaryBuffer() would have — so the release path's careful
-  // "do NOT syncRedRamFromFrameBuffer()" reasoning above applies unchanged here. Unlike that
-  // path this cannot fail, so there is no eviction and no restart branch.
-  warmLend.reset();
+  if (imageScratchStorage_.isAcquired()) {
+    // The arena view goes away before either its dedicated backing is released for reuse or its
+    // borrowed framebuffer is returned to the display.
+    warmScratch.reset();
+    imageScratchStorage_.release();
+  }
   if (finishLadder(ladder)) {
     lock.unlock();  // renderNormalPass takes it again; the page is drawn once the chapter is laid out again
     return;
@@ -6275,13 +6378,14 @@ void EpubReaderActivity::displayBuildPage(RenderLock& lock, const Page& page, co
     // bytes were never the problem, their placement was (§9.2.4). The borrowed region they come
     // from is the one the build already holds and is barely using (highWater 12864-28656 of
     // 52272), and nothing else can allocate inside it.
-    //
-    // Only while the buffer is actually lent; otherwise buildScratch_ is null and the scope
-    // self-disables, leaving the heap path exactly as it was.
-    FontCacheManager::ScopedSlotArena slotArena(*fcm, secondaryBorrowed_ ? buildScratch_.get() : nullptr);
-    // And a TrueType miss draws in it too, for the lookup alone (glyph_miss): the build stored the page's glyphs as it
-    // laid them out, so there are few.
-    const glyph_miss::Scope misses(secondaryBorrowed_ ? buildScratch_.get() : nullptr);
+    // Only a Background-C arena, never Background-B's. A borrow is always returned before a
+    // render (endBackgroundBorrow() at the top of recoverSecondaryBufferIfNeeded), so B's arena
+    // was historically unreachable here — but a PSRAM arena survives page turns, so B's build can
+    // be live during this pass. Sharing the arena with it would interleave two owners' blocks
+    // across the mid-render unlock window, and BuildArena only releases newest-first.
+    const bool arenaIsCurrentBuilds = secondaryBorrowed_ || (psramScratchLent_ && !backgroundPsramScratchActive_);
+    FontCacheManager::ScopedSlotArena slotArena(*fcm, arenaIsCurrentBuilds ? buildScratch_.get() : nullptr);
+    const glyph_miss::Scope misses(arenaIsCurrentBuilds ? buildScratch_.get() : nullptr);
     prewarmPageFonts(page, layout.marginLeft, contentTop);
 
     renderer.clearScreen();

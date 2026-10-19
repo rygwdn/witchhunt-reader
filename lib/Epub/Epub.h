@@ -438,9 +438,10 @@ class Epub {
   // non-null streams through ZipFile::EntryReader, which carves its buffers from the arena.
   // Removes a partial destination file on failure, so the caller can simply retry.
   bool extractItemToFileOnce(const std::string& itemHref, const std::string& destPath, BuildArena* arena) const;
-  // Drain one ZIP entry into `out` through an arena-backed EntryReader.
+  // readerOpened distinguishes a refusal before output from a mid-stream failure.
   bool readItemContentsToStreamWithArena(const std::string& itemHref, Print& out, BuildArena* arena,
-                                         const bool* stop) const;
+                                         const bool* stop, size_t chunkSize = 1024,
+                                         bool* readerOpened = nullptr) const;
   // Set for the duration of load() / a cover session: readItemContentsToStream takes its inflate
   // ring from here when the region has room, else from the heap as before. Not owned.
   BuildArena* loadScratch_ = nullptr;

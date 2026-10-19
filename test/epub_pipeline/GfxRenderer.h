@@ -52,6 +52,21 @@ class GfxRenderer {
   Orientation getOrientation() const { return Portrait; }
   RenderMode getRenderMode() const { return BW; }
   uint8_t* getWriteTarget() const { return frameBuffer_; }
+  bool hasSecondaryBuffer() const { return !secondaryBorrowed_; }
+  uint8_t* borrowSecondaryBuffer(size_t* bytes) {
+    if (secondaryBorrowed_) return nullptr;
+    secondaryBorrowed_ = true;
+    if (bytes) *bytes = sizeof(secondaryStorage_);
+    return secondaryStorage_;
+  }
+  void returnSecondaryBuffer() {
+    if (secondaryBorrowed_) {
+      secondaryBorrowed_ = false;
+      ++secondaryReturnCount_;
+    }
+  }
+  unsigned secondaryReturnCount() const { return secondaryReturnCount_; }
+
   int getWriteOriginY() const { return 0; }
   int getWriteRows() const { return 800; }
   void clearScreen(uint8_t = 0xFF) const {}
@@ -187,6 +202,9 @@ class GfxRenderer {
 
   // Converters write decoded pixels through getWriteTarget(); give them a real
   // buffer so those paths are memory-safe if exercised.
+  uint8_t secondaryStorage_[52 * 1024] = {};
+  bool secondaryBorrowed_ = false;
+  unsigned secondaryReturnCount_ = 0;
   mutable uint8_t frameBufferStorage_[60 * 800] = {};
   uint8_t* const frameBuffer_ = frameBufferStorage_;
 };

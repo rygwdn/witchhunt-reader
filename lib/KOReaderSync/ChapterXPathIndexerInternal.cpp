@@ -1,13 +1,16 @@
 #include "ChapterXPathIndexerInternal.h"
 
+#include <BuildArena.h>
 #include <Epub/VisibleText.h>
 #include <Epub/htmlEntities.h>
+#include <HeapPools.h>
 #include <Logging.h>
 #include <SaxParser/SaxFeedSink.h>
 #include <SaxParser/SaxParser.h>
 
 #include <algorithm>
 #include <cctype>
+#include <cstddef>
 #include <cstring>
 #include <string_view>
 #include <unordered_map>
@@ -299,8 +302,17 @@ bool streamSpine(const std::shared_ptr<Epub>& epub, const int spineIndex, SaxPar
   if (href.empty()) {
     return false;
   }
+  BuildArena* scratchArena = nullptr;
+#if defined(BOARD_HAS_PSRAM) && BOARD_HAS_PSRAM
+  // The <=32 KiB inflate ring and input chunk cannot fit the task stack or compete with TLS.
+  constexpr size_t kScratchBytes =
+      Epub::EXTRACT_ARENA_BYTES - Epub::EXTRACT_WRITE_BUFFER_BYTES + 2 * alignof(std::max_align_t);
+  PsramBytes scratchBytes = psramAllocBytes(kScratchBytes);
+  BuildArena scratch(scratchBytes.get(), scratchBytes ? kScratchBytes : 0);
+  if (scratch.valid()) scratchArena = &scratch;
+#endif
   SaxFeedSink sink(saxParser);
-  if (!epub->readItemContentsToStream(href, sink, 1024, sink.stopFlag())) {
+  if (!epub->readItemContentsToStream(href, sink, 1024, sink.stopFlag(), scratchArena)) {
     LOG_ERR("KOX", "Failed to stream spine=%d", spineIndex);
     return false;
   }

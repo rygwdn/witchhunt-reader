@@ -500,30 +500,33 @@ void FileBrowserActivity::generateCovers() {
   }
 }
 
-// Borrows the secondary framebuffer for the title parses and the cover decoders, as
-// HomeActivity::loadRecentCovers does and for the same reasons it gives: decoding beside two full
-// framebuffers has taken free heap to a few KB. Before the lend: the write buffer is two frames old after the last
-// swap, so it is brought up to the frame on the panel, and on the X4 RED RAM is seeded with that frame, which
-// single-buffer fast diff requires.
+// Keep title and cover decoding scratch independent from the display on PSRAM boards; on C3 the
+// same lease borrows the secondary framebuffer as before.
 bool FileBrowserActivity::lendForBackgroundWork() {
   if (lentRegion != nullptr) return true;
-  if (!renderer.hasSecondaryBuffer()) return false;
-  RenderLock lock(*this);
-  renderer.syncWriteBufferFromDisplayed();
-  renderer.syncRedRamFromFrameBuffer();
-  size_t size = 0;
-  uint8_t* region = renderer.borrowSecondaryBuffer(&size);
-  if (region == nullptr) return false;
-  coverScratch = makeUniqueNoThrow<BuildArena>(region, size);
+  uint8_t* region = coverScratchStorage.acquire(renderer, GfxScratchBuffer::DEFAULT_CAPACITY,
+                                                 GfxScratchBuffer::Policy::DedicatedOnly);
+  if (!region && renderer.hasSecondaryBuffer()) {
+    RenderLock lock(*this);
+    renderer.syncWriteBufferFromDisplayed();
+    renderer.syncRedRamFromFrameBuffer();
+    region = coverScratchStorage.acquire(renderer, GfxScratchBuffer::DEFAULT_CAPACITY,
+                                         GfxScratchBuffer::Policy::BorrowOnly);
+    if (region) renderer.setSingleBufferFastDiff(true);
+  }
+  if (!region) return false;
+  coverScratch = makeUniqueNoThrow<BuildArena>(region, coverScratchStorage.capacity());
   if (!coverScratch || !coverScratch->valid()) {
     coverScratch.reset();
-    renderer.returnSecondaryBuffer();  // cannot fail: the region never entered the heap
+    const bool borrowed = coverScratchStorage.isBorrowed();
+    coverScratchStorage.release();
+    if (borrowed) renderer.setSingleBufferFastDiff(false);
     return false;
   }
   lentRegion = region;
-  renderer.setSingleBufferFastDiff(true);
-  LOG_INF("FBR", "Lent secondary framebuffer for titles and covers (%u bytes, free=%lu)", static_cast<unsigned>(size),
-          static_cast<unsigned long>(esp_get_free_heap_size()));
+  LOG_INF("FBR", "Cover scratch: %s %u bytes (free=%lu)",
+          coverScratchStorage.isBorrowed() ? "borrowed secondary" : "dedicated",
+          static_cast<unsigned>(coverScratchStorage.capacity()), static_cast<unsigned long>(esp_get_free_heap_size()));
   return true;
 }
 
@@ -538,11 +541,12 @@ void FileBrowserActivity::returnLentBuffer(const bool callerHoldsRenderLock) {
     coverLoader->reset();
     if (lentRegion == nullptr) return;
     coverScratch.reset();
-    renderer.returnSecondaryBuffer();  // cannot fail: the region never entered the heap
-    renderer.setSingleBufferFastDiff(false);
+    const bool borrowed = coverScratchStorage.isBorrowed();
+    coverScratchStorage.release();
+    if (borrowed) renderer.setSingleBufferFastDiff(false);
     lentRegion = nullptr;
     Epub::clearCoverMetadataMemo();
-    LOG_INF("FBR", "Returned secondary framebuffer after titles and covers (free=%lu contig=%lu)",
+    LOG_INF("FBR", "Returned %s cover scratch (free=%lu contig=%lu)", borrowed ? "borrowed" : "dedicated",
             static_cast<unsigned long>(esp_get_free_heap_size()),
             static_cast<unsigned long>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_DEFAULT)));
   };

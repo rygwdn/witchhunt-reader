@@ -1897,6 +1897,16 @@ bool Section::createSectionFile(const BuildParams& p, const std::function<void(i
 }
 
 void Section::setExternalBuildScratch(BuildArena* scratch) {
+  if (scratch == externalScratch_) return;
+  // The caller owns this arena and may release its backing region as soon as it detaches or
+  // replaces it. Tear down a build using the old external arena before changing that lifetime.
+  const bool detachesActiveArena =
+      buildState_ && externalScratch_ != nullptr && buildState_->arena == externalScratch_ &&
+      scratch != externalScratch_;
+  if (detachesActiveArena) {
+    abortSectionBuild();
+  }
+
   // A build binds its arena exactly once, in initArena() at startBuild(). So if a build is
   // already live on the small owned arena and the large external region (the borrowed
   // framebuffer) only becomes available now, the build cannot adopt it — it keeps the small one

@@ -12,6 +12,8 @@
 #include <Epub.h>
 #include <Epub/FootnoteEntry.h>
 #include <Epub/Section.h>
+#include <HeapPools.h>
+#include <GfxScratchBuffer.h>
 
 #include <array>
 #include <atomic>
@@ -219,23 +221,17 @@ class EpubReaderActivity final : public Activity {
   };
 
   std::shared_ptr<Epub> epub;
-  // Build scratch backed by the borrowed secondary framebuffer (see the Background-C
-  // release site). Handed to section->setExternalBuildScratch() so build allocations
-  // land inside the lent block instead of the heap — nothing can allocate in the region,
-  // so the return can never fail on a fragmented hole. Declared BEFORE `section`: the
-  // section (whose in-flight build releases into this arena) must destroy first.
+  // Storage owners precede every arena view and Section that can allocate into them.
+  // Released PSRAM blocks stay resident and are reused until the reader exits.
+  GfxScratchBuffer buildScratchStorage_;
+  GfxScratchBuffer imageScratchStorage_;
   std::unique_ptr<BuildArena> buildScratch_;
-  // True while the secondary framebuffer is lent to buildScratch_ (borrowed, not freed).
-  // Gates the returnSecondaryBuffer() path in recoverSecondaryBufferIfNeeded()/onExit.
+  // True while the build arena is the display's lent secondary framebuffer, not dedicated PSRAM.
   bool secondaryBorrowed_ = false;
-  // True when the CURRENT holder of that borrow is Background-B rather than Background-C.
-  // The two have opposite lifetimes: C's borrow lasts until its build ends (the reader is
-  // waiting on it and has no AA to lose), while B's is pure look-ahead and must be handed
-  // back the moment the reader needs the buffer again — AA is gated on a resident secondary
-  // (see renderContents), so a borrow held across a page turn silently renders it BW.
-  // Ownership transfers to C (this clears, secondaryBorrowed_ stays) when buildSection()
-  // adopts B's in-flight section on a consecutive boundary cross.
   bool backgroundBorrowActive_ = false;
+  // True while the Section build arena is attached to dedicated PSRAM storage.
+  bool psramScratchLent_ = false;
+  bool backgroundPsramScratchActive_ = false;
   std::unique_ptr<Section> section = nullptr;
   int currentSpineIndex = 0;
   // Where to land when this section is (re)built. INVARIANT: while a section is loaded this
@@ -916,6 +912,17 @@ class EpubReaderActivity final : public Activity {
   // Background-B gives its borrowed buffer back to an image decode the reader is about to see (LaneBeforeBuild): the
   // live build is discarded, not counted as a preemption, and counted as a yield instead. `to` names the decode.
   void yieldBackgroundBorrowToImages(const char* to);
+  // Point `target`'s build at the dedicated external arena (allocating the 52 KB block on first
+  // use), so the build runs without taking the framebuffer. Returns false — changing nothing —
+  // when PSRAM is exhausted or the arena object could not be built, and the caller then falls
+  // back to the borrow/release path this replaces. Always false on a board without PSRAM.
+  // `target` must outlive the arena (see buildScratchStorage_'s declaration order note).
+  bool acquirePsramBuildScratch(Section* target);
+  // Detach the external arena from `holder` (whose build has ended or been aborted) and drop the
+  // arena object, keeping the external block allocated for the next build. Unlike
+  // endBackgroundBorrow() this never discards a live build: nothing else wants this memory, so
+  // there is no reason to preempt. No-op when the arena is not lent.
+  void releasePsramBuildScratch(Section* holder);
   // Background C: advance the incremental build of the CURRENT section (the one the reader is
   // looking at) by one bounded slice. Runs only while `section` has an active build, with the
   // highest reader-build priority (ahead of A and B). On a newly built target page or on

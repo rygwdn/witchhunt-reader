@@ -241,13 +241,14 @@ class Section {
   bool hasActiveBuild() const { return static_cast<bool>(buildState_); }
   // Optional external scratch region for the build's arena (arena builds only;
   // ignored otherwise): typically the borrowed secondary framebuffer, so build
-  // scratch never touches — or fragments — the heap. The region must stay valid
-  // until the build completes or is aborted; it is reset (not freed) per build.
+  // scratch never touches — or fragments — the heap. Caller-owned and valid while
+  // attached; detaching/replacing it aborts a live build using that arena before
+  // returning, after which the caller may release it. Re-setting the same pointer
+  // is a no-op. The arena is reset (not freed) per build.
   // Call before the first stepSectionBuild/createSectionFile of a build; a null
   // pointer reverts to the internal heap-backed arena.
-  // Not a plain setter: if a build is already live on the small owned arena when a large
-  // external region arrives, it restarts the build so the region is actually used. See the
-  // definition in Section.cpp.
+  // If a build is already live on the small owned arena when an external region arrives,
+  // it restarts the build so the region is actually used. See the definition in Section.cpp.
   void setExternalBuildScratch(BuildArena* scratch);
   // Percent of the spine XHTML consumed by the in-flight build (0–100; 100 once the
   // stream is exhausted and only Finalize remains). 0 when no build is live. Feeds the

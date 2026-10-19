@@ -1,10 +1,12 @@
 #include "ReaderActivity.h"
 
 #include <Bitmap.h>
+#include <GfxScratchBuffer.h>
 #include <BuildArena.h>
 #include <CooperativeAbort.h>
 #include <FsHelpers.h>
 #include <HalStorage.h>
+#include <HeapPools.h>
 #include <I18n.h>
 #include <JpegToBmpConverter.h>
 #include <Logging.h>
@@ -140,9 +142,6 @@ ReaderActivity::CoverExtractSession::Status ReaderActivity::CoverExtractSession:
       requestedBytes_ = 0;
       return Status::Error;
     }
-    // Logged once per allocation. The request is remembered separately from what was granted:
-    // comparing the request against the granted size made every step after a shortfall free the
-    // buffer, retry the full size, fail and log again (~50 times for one 467 KB cover).
     if (want != chunkBytes) {
       LOG_DBG("CEX", "Chunk buffer %zu -> %zu bytes (%s)", chunkBytes, want,
               bufInArena_ ? "what the lent region has room for" : "heap too fragmented for the full size");
@@ -953,47 +952,34 @@ void ReaderActivity::onEnter() {
       GUI.fillPopupProgress(p->renderer, p->popup, percent);
       LOG_DBG("READER", "Indexing progress %u%%", static_cast<unsigned>(percent));
     };
-    // First-open indexing allocates per-spine transient state — the batch-size-lookup vectors
-    // (~28 KB contiguous for a 1700-spine book) and the TOC's 32 KB NCX inflate ring — while the
-    // ~48 KB secondary framebuffer sits unused. Observed on-device: buildBookBin aborted (bare
-    // operator new under -fno-exceptions) at 51 KB free / 30 KB contig, after the TOC pass had
-    // already lost its inflate ring and produced 0 TOC entries. Lend the buffer out for the build
-    // (the popup above is drawn BEFORE the release — drawPopup needs the active buffer — and
-    // load() performs no rendering) and restore it before the reader activity starts. Same
-    // pattern as HomeActivity cover loading. If the realloc fails, EpubReaderActivity::onEnter
-    // sees the missing buffer (secondaryBufferDegraded_) and recovers once heap allows.
-    // First-open indexing needs two big transients -- the TOC's 32 KB NCX inflate ring and the
-    // per-spine batch-size tables (~28 KB contiguous for a 1700-spine book) -- while the ~52 KB
-    // secondary framebuffer sits unused. It used to RELEASE the buffer for the load and realloc
-    // it afterwards; a book-lifetime allocation landing in the freed hole then left the realloc
-    // short, and the reader started without its buffer (heap-recovery restart at best). Now the
-    // buffer is LENT: the rings bump-allocate inside the region through Epub::load's scratch,
-    // the region never enters the heap, and the return below cannot fail. So does buildBookBin's
+    // First-open indexing can need ~28 KB contiguous for the spine tables and a 32 KB NCX inflate
+    // ring. Keep that transient out of fragmented internal RAM: use dedicated PSRAM when present,
+    // otherwise lend the secondary framebuffer after drawing the popup. So does buildBookBin's
     // spine size table, 16 B a spine item: on the heap, King's Avatar's (1732) did not fit on the
     // X3 and the lookup took a ZIP directory walk per spine item, a 431 s open. Same pattern as
-    // Background-C's borrow.
-    // The popup above is drawn BEFORE the borrow: drawPopup needs the active buffer, and load()
-    // performs no rendering.
-    uint8_t* lentForIndexing = nullptr;
-    size_t lentSize = 0;
-    if ((firstOpenIndexing || bookFontsPending) && renderer.hasSecondaryBuffer()) {
+    // Background-C's borrow. The popup above is drawn BEFORE the borrow: drawPopup needs the
+    // active buffer, and load() performs no rendering.
+    GfxScratchBuffer indexingStorage;
+    uint8_t* indexingBuffer = nullptr;
+#if defined(BOARD_HAS_PSRAM) && BOARD_HAS_PSRAM
+    if (firstOpenIndexing || bookFontsPending) {
+      indexingBuffer = indexingStorage.acquire(renderer, GfxScratchBuffer::DEFAULT_CAPACITY,
+                                                GfxScratchBuffer::Policy::DedicatedOnly);
+    }
+#endif
+    if ((firstOpenIndexing || bookFontsPending) && !indexingBuffer && renderer.hasSecondaryBuffer()) {
       RenderLock lock;
-      // The popup's swap left the write buffer holding the pre-popup frame; the return below seeds
-      // the secondary from it. Make that the frame on the panel, so the reader's own overlays
-      // composite onto what is actually displayed.
       renderer.syncWriteBufferFromDisplayed();
-      // The popup's FAST loaded RED RAM with the pre-popup frame, not the popup, and the first
-      // FAST after the return below diffs against RED. Seed it with the displayed frame while the
-      // secondary still holds it, as the X4's single-buffer fast diff requires (no-op on X3).
       renderer.syncRedRamFromFrameBuffer();
-      lentForIndexing = renderer.borrowSecondaryBuffer(&lentSize);
-      if (lentForIndexing) {
+      indexingBuffer = indexingStorage.acquire(renderer, GfxScratchBuffer::DEFAULT_CAPACITY,
+                                                GfxScratchBuffer::Policy::BorrowOnly);
+      if (indexingBuffer) {
         renderer.setSingleBufferFastDiff(true);
         LOG_INF("READER", "Lent secondary framebuffer for first-open indexing (%u bytes, free=%lu)",
-                static_cast<unsigned>(lentSize), static_cast<unsigned long>(esp_get_free_heap_size()));
+                static_cast<unsigned>(indexingStorage.capacity()), static_cast<unsigned long>(esp_get_free_heap_size()));
       }
     }
-    BuildArena indexingScratch(lentForIndexing, lentSize);
+    BuildArena indexingScratch(indexingBuffer, indexingStorage.capacity());
     const bool showsProgress = firstOpenIndexing || bookFontsPending;
     auto epub = loadEpub(initialBookPath, indexingScratch.valid() ? &indexingScratch : nullptr,
                          showsProgress ? +onBuildProgress : nullptr, showsProgress ? &indexingProgress : nullptr);
@@ -1001,13 +987,17 @@ void ReaderActivity::onEnter() {
       // load() left nothing in the region: its rings were scoped to each read.
       BookFonts::prepare(*epub, indexingScratch.valid() ? &indexingScratch : nullptr);
     }
-    if (lentForIndexing) {
-      RenderLock lock;
-      renderer.returnSecondaryBuffer();  // cannot fail: the region never entered the heap
-      renderer.setSingleBufferFastDiff(false);
-      LOG_INF("READER", "Returned secondary framebuffer after first-open indexing (free=%lu contig=%lu)",
-              static_cast<unsigned long>(esp_get_free_heap_size()),
-              static_cast<unsigned long>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_DEFAULT)));
+    if (indexingBuffer) {
+      if (indexingStorage.isBorrowed()) {
+        RenderLock lock;
+        indexingStorage.release();
+        renderer.setSingleBufferFastDiff(false);
+        LOG_INF("READER", "Returned secondary framebuffer after first-open indexing (free=%lu contig=%lu)",
+                static_cast<unsigned long>(esp_get_free_heap_size()),
+                static_cast<unsigned long>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_DEFAULT)));
+      } else {
+        indexingStorage.release();
+      }
     }
     if (!epub) {
       onGoBack();
