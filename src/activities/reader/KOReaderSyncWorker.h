@@ -21,6 +21,8 @@ struct KOReaderSyncJob {
   std::string path;
   int spine = -1;
   int page = -1;
+  // Baseline used to retain turns accumulated while an async push is running.
+  int32_t turnsSincePushAtStart = -1;
 
   unsigned long connectTimeoutMs = 0;
 

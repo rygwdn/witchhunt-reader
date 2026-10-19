@@ -36,6 +36,7 @@ KOReaderSyncJob buildSilentPushJob(const std::string& epubPath, const KOReaderPo
   job.path = epubPath;
   job.spine = spine;
   job.page = page;
+  job.turnsSincePushAtStart = AUTOSYNC_STATE.getTurnsSincePush();
   job.progress.document = KOReaderAutoSync::documentHashFor(epubPath);
   job.progress.progress = localKoPos.xpath;
   job.progress.percentage = localKoPos.percentage;
@@ -133,16 +134,23 @@ void AutoSyncState::markSyncFailed() {
   saveToFile();
 }
 
-void AutoSyncState::markSynced(const std::string& bookPath, const int spine, const int page) {
-  pending = false;
+void AutoSyncState::markSynced(const std::string& bookPath, const int spine, const int page,
+                               const int32_t turnsAtPushStart) {
+  // Discard the threshold already covered by this upload, not turns recorded while it ran.
+  const bool turnsDuringPush = turnsAtPushStart >= 0 && turnsSincePush > turnsAtPushStart;
+  pending = turnsDuringPush && (lastSeenSpine != spine || lastSeenPage != page);
   lastSyncFailedFlag = false;
   lastDocPath = bookPath;
   lastPushedSpine = spine;
   lastPushedPage = page;
 
-  lastSeenSpine = spine;
-  lastSeenPage = page;
-  turnsSincePush = 0;
+  if (turnsDuringPush) {
+    turnsSincePush -= turnsAtPushStart;
+  } else {
+    lastSeenSpine = spine;
+    lastSeenPage = page;
+    turnsSincePush = 0;
+  }
   saveToFile();
 }
 
@@ -220,7 +228,7 @@ bool KOReaderAutoSync::finalizeSilentPush(const uint64_t seq) {
     AUTOSYNC_STATE.markSyncFailed();
     return false;
   }
-  AUTOSYNC_STATE.markSynced(job.path, job.spine, job.page);
+  AUTOSYNC_STATE.markSynced(job.path, job.spine, job.page, job.turnsSincePushAtStart);
   LOG_DBG("AutoSync", "Silent push OK: %s (%.6f)", job.path.c_str(), job.progress.percentage);
   return true;
 }

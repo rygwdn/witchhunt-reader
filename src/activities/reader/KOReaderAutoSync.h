@@ -50,7 +50,8 @@ class AutoSyncState {
 
   void noteProgress(const std::string& bookPath, int spine, int page);
 
-  void markSynced(const std::string& bookPath, int spine, int page);
+  // A nonnegative snapshot preserves turns accrued while an async push was running.
+  void markSynced(const std::string& bookPath, int spine, int page, int32_t turnsAtPushStart = -1);
 
   void markSyncFailed();
   bool lastSyncFailed() const { return lastSyncFailedFlag; }

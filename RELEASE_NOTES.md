@@ -222,6 +222,9 @@ Where the code here is someone else's, it is credited in the source file it live
   behavior is unchanged.
 - **The sleep screen shows the busy indicator while a KoSync sleep push is active**, then redraws
   the configured sleep screen when the sleep sync wait ends.
+- **Automatic KOReader interval pushes finish in the reader.** Completed uploads are finalized
+  before another sync starts, and page turns made while an upload is in flight still count toward
+  the next interval.
 
 ## 2.37 — 2026-09-29
 

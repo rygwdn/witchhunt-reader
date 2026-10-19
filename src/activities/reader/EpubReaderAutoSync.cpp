@@ -317,7 +317,8 @@ void EpubReaderActivity::maybeAutoPushInterval() {
   if (interval == 0 || AUTOSYNC_STATE.getTurnsSincePush() < interval) {
     return;
   }
-  if ((autoSyncLastPushAt != 0 && millis() - autoSyncLastPushAt < KOReaderAutoSync::MIN_INTERVAL_PUSH_GAP_MS) ||
+  if (autoSyncPushSeq != 0 ||
+      (autoSyncLastPushAt != 0 && millis() - autoSyncLastPushAt < KOReaderAutoSync::MIN_INTERVAL_PUSH_GAP_MS) ||
       KOReaderAutoSync::jobActive()) {
     return;
   }
@@ -363,6 +364,7 @@ void EpubReaderActivity::refreshAutoSyncIndicator() {
 }
 
 void EpubReaderActivity::serviceAutoSync() {
+  pollAutoSyncJob();
   if (autoSyncPullPending) {
     maybeAutoPullOnWake();
   }
