@@ -231,7 +231,12 @@ target_compile_definitions(epub_build_inventory PRIVATE
   LOG_LEVEL=1
   BUILD_ARENA_TRACE=1
 )
-target_compile_options(epub_build_inventory PRIVATE -O2 -g -fno-omit-frame-pointer -fno-ipa-icf)
+target_compile_options(epub_build_inventory PRIVATE -O2 -g -fno-omit-frame-pointer)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  # GCC's interprocedural identical-code folding can merge profiler sites and obscure allocation
+  # attribution. Clang has no corresponding compiler flag; it does not enable this pass here.
+  target_compile_options(epub_build_inventory PRIVATE -fno-ipa-icf)
+endif()
 target_link_libraries(epub_build_inventory PRIVATE
   crosspoint_test_common
   SaxParser

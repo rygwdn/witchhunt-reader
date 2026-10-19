@@ -8,6 +8,11 @@
 #include <unistd.h>
 #endif
 
+#if defined(__GLIBC__)
+extern "C" void* __libc_malloc(size_t) __attribute__((weak));
+extern "C" void __libc_free(void*) __attribute__((weak));
+#endif
+
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -16,6 +21,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <new>
 #include <string>
 #include <vector>
 
@@ -26,11 +32,11 @@
 #include "HalStorage.h"
 
 // ---------------------------------------------------------------------------
-// Heap instrumentation: malloc/free/calloc/realloc are interposed and every
-// allocation gets a hidden header in front of the user pointer. The header
-// carries a magic value (so free/realloc can recognize pointers that did NOT
-// come from this malloc — e.g. aligned_alloc, posix_memalign, or allocations
-// made inside the hooks themselves — and pass them through untouched) and the
+// Heap instrumentation: malloc/free/calloc/realloc are interposed, and ordinary C++
+// allocation functions explicitly route through malloc. Every allocation gets a hidden
+// header in front of the user pointer. The header carries a magic value (so free/realloc
+// can recognize pointers that did NOT come from this malloc — e.g. aligned_alloc,
+// posix_memalign, or allocations made inside the hooks themselves — and pass them through untouched) and the
 // measurement epoch the block was allocated in (so freeing a block from an
 // earlier measurement window can never underflow the live-byte counter of the
 // current window).
@@ -78,10 +84,9 @@ static void* rawAlloc(size_t bytes) {
   static malloc_fn_t realMalloc = nullptr;
   if (!realMalloc) {
     realMalloc = reinterpret_cast<malloc_fn_t>(dlsym(RTLD_NEXT, "malloc"));
-    if (!realMalloc) {
-      extern void* __libc_malloc(size_t) __attribute__((weak));
-      realMalloc = __libc_malloc;
-    }
+#if defined(__GLIBC__)
+    if (!realMalloc) realMalloc = __libc_malloc;
+#endif
   }
   return realMalloc ? realMalloc(bytes) : nullptr;
 }
@@ -91,10 +96,9 @@ static void rawFree(void* p) {
   static free_fn_t realFree = nullptr;
   if (!realFree) {
     realFree = reinterpret_cast<free_fn_t>(dlsym(RTLD_NEXT, "free"));
-    if (!realFree) {
-      extern void __libc_free(void*) __attribute__((weak));
-      realFree = __libc_free;
-    }
+#if defined(__GLIBC__)
+    if (!realFree) realFree = __libc_free;
+#endif
   }
   if (realFree) realFree(p);
 }
@@ -182,6 +186,25 @@ void* realloc(void* ptr, size_t size) {
 }
 
 }  // extern "C"
+
+// libc++'s operator new does not reliably pass through this executable's malloc
+// interposer on Darwin. Replace the ordinary C++ allocation forms explicitly
+// and route them through malloc so the same epoch/header accounting applies.
+void* operator new(size_t size) {
+  if (void* p = malloc(size ? size : 1)) return p;
+  throw std::bad_alloc();
+}
+
+void* operator new[](size_t size) { return ::operator new(size); }
+void* operator new(size_t size, const std::nothrow_t&) noexcept { return malloc(size ? size : 1); }
+void* operator new[](size_t size, const std::nothrow_t&) noexcept { return malloc(size ? size : 1); }
+
+void operator delete(void* p) noexcept { free(p); }
+void operator delete[](void* p) noexcept { free(p); }
+void operator delete(void* p, size_t) noexcept { free(p); }
+void operator delete[](void* p, size_t) noexcept { free(p); }
+void operator delete(void* p, const std::nothrow_t&) noexcept { free(p); }
+void operator delete[](void* p, const std::nothrow_t&) noexcept { free(p); }
 
 static void beginMeasurement() {
   g_liveBytes.store(0);

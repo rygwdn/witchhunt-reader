@@ -2,8 +2,11 @@
 
 #include <cstddef>
 #include <cstdlib>
+#include <cstdint>
 #include <cstring>
 #include <string>
+
+class Print;
 
 // Minimal host-side stand-in for the Arduino framework's WString/String.
 // Provides the surface used by repo code compiled in host tests: c_str/length
@@ -17,6 +20,24 @@ class String {
   // explicit: an implicit std::string->String conversion makes calls ambiguous
   // where repo code overloads on both types (e.g. hasGifExtension).
   explicit String(std::string s) : _buf(std::move(s)) {}
+  String& operator=(const char* s) {
+    _buf = s ? s : "";
+    return *this;
+  }
+  bool concat(const char* s) {
+    if (!s) return true;
+    _buf += s;
+    return true;
+  }
+  size_t write(uint8_t c) {
+    _buf.push_back(static_cast<char>(c));
+    return 1;
+  }
+  size_t write(const uint8_t* bytes, size_t size) {
+    _buf.append(reinterpret_cast<const char*>(bytes), size);
+    return size;
+  }
+
 
   const char* c_str() const { return _buf.c_str(); }
   size_t length() const { return _buf.length(); }

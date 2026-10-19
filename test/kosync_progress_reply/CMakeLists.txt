@@ -8,6 +8,12 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(arduinojson)
 
+# PlatformIO's offline package contains the headers but omits the upstream CMake project.
+if(NOT TARGET ArduinoJson AND EXISTS "${arduinojson_SOURCE_DIR}/src/ArduinoJson.h")
+  add_library(ArduinoJson INTERFACE)
+  target_include_directories(ArduinoJson INTERFACE "${arduinojson_SOURCE_DIR}/src")
+endif()
+
 add_executable(KOReaderProgressReplyTest
   KOReaderProgressReplyTest.cpp
 )

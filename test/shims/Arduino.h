@@ -56,6 +56,8 @@ inline unsigned long millis() {
   return now;
 }
 
+inline void delay(unsigned long) {}
+
 namespace host_clock {
 class Ticking {
  public:

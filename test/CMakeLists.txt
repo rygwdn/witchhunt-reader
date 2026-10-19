@@ -40,6 +40,7 @@ add_library(crosspoint_test_common INTERFACE)
 target_include_directories(crosspoint_test_common INTERFACE
   ${REPO_ROOT}
   ${REPO_ROOT}/lib
+  ${REPO_ROOT}/lib/hal
 )
 target_compile_options(crosspoint_test_common INTERFACE
   -Wall
