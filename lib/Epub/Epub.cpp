@@ -786,15 +786,14 @@ void Epub::parseCssFiles() const {
   if (skippedForLowHeap) {
     cssParser->abortCacheCompile();
     LOG_ERR("EBP", "CSS cache not persisted (stylesheet skipped on low heap); will re-parse on next open");
-    cssParser->clear();
-    return;
-  }
-
-  // Finalize compact cache for next time.
-  if (!cssParser->endCacheCompile()) {
+  } else if (!cssParser->endCacheCompile()) {
+    // Finalize compact cache for next time.
     LOG_ERR("EBP", "Failed to finalize CSS rules cache");
   }
 
+  // This line ends the CSS phase — the popup's progress and the tests' phase counters advance on
+  // it — so it must be emitted on every way out, including the skip above (which loaded zero
+  // rules: ruleCount() is 0 after abortCacheCompile, truthfully reported).
   LOG_DBG("EBP", "Loaded %zu CSS style rules from %zu files", cssParser->ruleCount(), cssFiles.size());
   cssParser->clear();
 }

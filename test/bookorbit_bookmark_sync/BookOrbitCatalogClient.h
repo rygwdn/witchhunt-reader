@@ -14,4 +14,7 @@ class BookOrbitCatalogClient {
   static Error acknowledgeBookmarks(const BookOrbitBookmarkAckRequest&, std::string& response);
   static Error exchangeBookmarks(const BookOrbitBookmarkExchangeRequest&, BookOrbitBookmarkExchangeResponse& response);
   static const char* errorString(Error);
+
+  /** HTTP status of the last request, read by the sync worker for diagnostics. */
+  static int lastHttpCode;
 };
