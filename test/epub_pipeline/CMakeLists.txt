@@ -109,6 +109,7 @@ add_executable(EpubPipelineTest
   LostTocRetryTest.cpp
   TocSourceTest.cpp
   PageListSinkTest.cpp
+  PageSerializeGuardTest.cpp
   MetadataSidecarTest.cpp
   SidecarFilesTest.cpp
   SectionAbortTest.cpp
