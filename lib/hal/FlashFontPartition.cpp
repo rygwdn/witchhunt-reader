@@ -32,6 +32,7 @@ struct WriteSession {
   size_t partitionSize = 0;
 };
 static WriteSession s_ws;
+static uint32_t s_partitionErases = 0;  // whole-partition erases since boot: one per font cache build
 
 // --- Internal helpers ---
 
@@ -117,8 +118,8 @@ bool beginWrite(const char* familyName) {
     s_ws.active = false;
     return false;
   }
-  LOG_INF("FFP", "Erasing flash font partition (%u B of %u)...", static_cast<unsigned>(usable),
-          static_cast<unsigned>(part->size));
+  LOG_INF("FFP", "Erasing flash font partition (%u B of %u), erase %u since boot...", static_cast<unsigned>(usable),
+          static_cast<unsigned>(part->size), static_cast<unsigned>(++s_partitionErases));
   if (esp_partition_erase_range(part, 0, usable) != ESP_OK) {
     LOG_ERR("FFP", "beginWrite: erase failed");
     s_ws.active = false;  // ensure no stale session survives a failed erase

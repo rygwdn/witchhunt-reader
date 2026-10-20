@@ -145,13 +145,14 @@ bool FlashGlyphStore::beginInstall(const Layout& layout, const uint8_t identity[
   }
 
   // The header sector goes first: from here until finishInstall() the store reads as not installed.
-  bool erased = eraseWritten(0, kFirstRegionOffset);
+  bool erased = eraseWritten(0, kFirstRegionOffset, "install: header+state");
   for (uint8_t s = 0; erased && s < g.styleCount; ++s) {
     if ((keepStyles & (1u << s)) != 0) continue;
-    erased = eraseWritten(layout.styleOffset[s], alignUp(layout.styleSize[s], kSectorBytes));
+    erased = eraseWritten(layout.styleOffset[s], alignUp(layout.styleSize[s], kSectorBytes), "install: style block");
   }
-  erased = erased && eraseWritten(g.indexOffset, tableBytes(g.indexSlots)) &&
-           eraseWritten(g.pairOffset, tableBytes(g.pairSlots)) && eraseWritten(g.logOffset, g.logSize);
+  erased = erased && eraseWritten(g.indexOffset, tableBytes(g.indexSlots), "install: index") &&
+           eraseWritten(g.pairOffset, tableBytes(g.pairSlots), "install: pairs") &&
+           eraseWritten(g.logOffset, g.logSize, "install: log");
   if (!erased) {
     LOG_ERR("GST", "install: erase failed");
     return false;
@@ -164,13 +165,20 @@ bool FlashGlyphStore::writeStyleData(const uint8_t style, const uint32_t offset,
   if (!installing_ || style >= installing_->geometry.styleCount) return false;
   const StyleInfo& info = installing_->styles[style];
   if (offset > info.size || len > info.size - offset) return false;
-  return flash_.program(info.offset + offset, data, len);
+  if (!flash_.program(info.offset + offset, data, len)) return false;
+  progStyleBytes_ += len;
+  noteProgram(len);
+  return true;
 }
 
 bool FlashGlyphStore::finishInstall() {
   if (!installing_) return false;
   installing_->check = fnv1a(installing_.get(), offsetof(Header, check));
   const bool written = flash_.program(0, installing_.get(), sizeof(Header));
+  if (written) {
+    progHeaderBytes_ += sizeof(Header);
+    noteProgram(sizeof(Header));
+  }
   installing_.reset();
   if (!written) {
     LOG_ERR("GST", "install: header write failed");
@@ -249,6 +257,27 @@ void FlashGlyphStore::close() {
   firstSd_ = 0;
   region_ = index_ = pairs_ = log_ = nullptr;
   geometry_ = Geometry{};
+  // The session's write/erase accounting, for flash-health monitoring: one line per session that
+  // touched flash, with the buckets. Erase lines carry their reasons as they happen. Guarded on
+  // open_: open() begins with close(), and an install's accounting must survive that into the
+  // session's real close.
+  if (open_) {
+    if (progCalls_ != 0 || eraseCalls_ != 0) {
+      LOG_INF(
+          "GST",
+          "close: %lu B programmed in %lu calls (log %lu B, %lu slots, %lu pairs, %lu faces, style %lu B, header %lu "
+          "B, wipe %lu); %lu B erased in %lu calls",
+          static_cast<unsigned long>(progBytes_), static_cast<unsigned long>(progCalls_),
+          static_cast<unsigned long>(progLogBytes_), static_cast<unsigned long>(progSlots_),
+          static_cast<unsigned long>(progPairs_), static_cast<unsigned long>(progFaces_),
+          static_cast<unsigned long>(progStyleBytes_), static_cast<unsigned long>(progHeaderBytes_),
+          static_cast<unsigned long>(progWipeWord_), static_cast<unsigned long>(eraseBytes_),
+          static_cast<unsigned long>(eraseCalls_));
+    }
+    eraseCalls_ = eraseBytes_ = progCalls_ = progBytes_ = 0;
+    progLogBytes_ = progSlots_ = progPairs_ = progFaces_ = 0;
+    progStyleBytes_ = progHeaderBytes_ = progWipeWord_ = progMilestone_ = 0;
+  }
   logUsed_ = usedSlots_ = usedPairs_ = claimedFaces_ = 0;
   noGlyphMarks_ = 0;
   open_ = false;
@@ -327,7 +356,7 @@ uint32_t FlashGlyphStore::scanLog() const {
 
 // Erases are what wear the chip, and one costs 4-6 ms even on a blank sector (measured on the X3), so only
 // sectors that hold data are erased; neighbouring ones go in one call.
-bool FlashGlyphStore::eraseWritten(const uint32_t offset, const uint32_t len) {
+bool FlashGlyphStore::eraseWritten(const uint32_t offset, const uint32_t len, const char* reason) {
   uint32_t runStart = 0;
   uint32_t runLen = 0;
   for (uint32_t sector = offset; sector < offset + len; sector += kSectorBytes) {
@@ -336,10 +365,23 @@ bool FlashGlyphStore::eraseWritten(const uint32_t offset, const uint32_t len) {
       runLen += kSectorBytes;
       continue;
     }
-    if (runLen != 0 && !flash_.erase(runStart, runLen)) return false;
+    if (runLen != 0) {
+      noteErase(reason, runStart, runLen);
+      if (!flash_.erase(runStart, runLen)) return false;
+    }
     runLen = 0;
   }
-  return runLen == 0 || flash_.erase(runStart, runLen);
+  if (runLen == 0) return true;
+  noteErase(reason, runStart, runLen);
+  return flash_.erase(runStart, runLen);
+}
+
+void FlashGlyphStore::noteErase(const char* reason, const uint32_t offset, const uint32_t bytes) {
+  ++eraseCalls_;
+  eraseBytes_ += bytes;
+  LOG_INF("GST", "erase %s: %lu B at %lu (erase %lu, %lu B this session)", reason, static_cast<unsigned long>(bytes),
+          static_cast<unsigned long>(offset), static_cast<unsigned long>(eraseCalls_),
+          static_cast<unsigned long>(eraseBytes_));
 }
 
 // Through the mapping when the sector is in it (a wipe), else by reading small chunks (an install).
@@ -425,7 +467,9 @@ FlashGlyphStore::Insert FlashGlyphStore::insert(const uint32_t tableOffset, cons
     // A slot in use, or one cut short (some bits programmed), is never programmed again.
     if (!slotErased(flashSlot(table, i))) continue;
     const Slot slot{key, value};
-    return flash_.program(tableOffset + i * kSlotBytes, &slot, sizeof slot) ? Insert::Done : Insert::WriteFailed;
+    if (!flash_.program(tableOffset + i * kSlotBytes, &slot, sizeof slot)) return Insert::WriteFailed;
+    noteProgram(sizeof slot);
+    return Insert::Done;
   }
   return Insert::ChainFull;
 }
@@ -435,6 +479,7 @@ FlashGlyphStore::Commit FlashGlyphStore::insertGlyphSlot(const uint32_t key, con
   switch (insert(geometry_.indexOffset, index_, geometry_.indexSlots, key, value)) {
     case Insert::Done:
       ++usedSlots_;
+      ++progSlots_;
       return Commit::Stored;
     case Insert::ChainFull:
       LOG_INF("GST", "full: a probe chain passed %u slots; wipe pending", static_cast<unsigned>(kMaxProbe));
@@ -486,6 +531,8 @@ FlashGlyphStore::Commit FlashGlyphStore::writeBatch(GlyphBatch& batch) {
     stopWrites();
     return Commit::WriteFailed;
   }
+  progLogBytes_ += batch.used_;
+  noteProgram(batch.used_);
   logUsed_ = base + batch.used_;
   // ...then the slots, so a probe never finds a slot whose record is incomplete. A slot holds its record's
   // dataOffset, never 0: a cut can only leave extra 1 bits, so a torn slot never reads as kNoGlyph.
@@ -499,6 +546,20 @@ FlashGlyphStore::Commit FlashGlyphStore::writeBatch(GlyphBatch& batch) {
 
 /// No-glyph marks in one session before the storm detector names the accumulation (markNoGlyph()).
 constexpr uint32_t kNoGlyphStormMarks = 64;
+
+/// Programmed bytes between milestone lines naming the session's write buckets.
+constexpr uint32_t kProgramMilestoneBytes = 4096;
+
+void FlashGlyphStore::noteProgram(const uint32_t bytes) {
+  ++progCalls_;
+  progBytes_ += bytes;
+  if (progBytes_ / kProgramMilestoneBytes == progMilestone_) return;
+  progMilestone_ = progBytes_ / kProgramMilestoneBytes;
+  LOG_INF("GST", "wrote %lu B in %lu calls this session (log %lu B, %lu slots, %lu pairs, %lu faces)",
+          static_cast<unsigned long>(progBytes_), static_cast<unsigned long>(progCalls_),
+          static_cast<unsigned long>(progLogBytes_), static_cast<unsigned long>(progSlots_),
+          static_cast<unsigned long>(progPairs_), static_cast<unsigned long>(progFaces_));
+}
 
 FlashGlyphStore::Commit FlashGlyphStore::markNoGlyph(const uint32_t key) {
   if (!open_ || !isGlyphKey(key) || !faceClaimed(key)) return Commit::Refused;
@@ -556,6 +617,8 @@ bool FlashGlyphStore::faceIndex(const uint8_t family, const uint32_t ppem26_6, u
     stopWrites();
     return false;
   }
+  ++progFaces_;
+  noteProgram(sizeof claim);
   claimedFaces_ |= 1u << free;
   *index = static_cast<uint8_t>(free);
   if (freeCount == 1) {
@@ -597,6 +660,7 @@ bool FlashGlyphStore::storePair(const uint16_t left, const uint16_t right, const
   switch (insert(geometry_.pairOffset, pairs_, geometry_.pairSlots, key, value)) {
     case Insert::Done:
       ++usedPairs_;
+      ++progPairs_;
       return true;
     case Insert::ChainFull:
       return false;
@@ -627,6 +691,8 @@ bool FlashGlyphStore::recordWipePending() {
     LOG_ERR("GST", "could not record wipe pending in flash");
     return false;
   }
+  ++progWipeWord_;
+  noteProgram(sizeof zero);
   return true;
 }
 
@@ -646,8 +712,10 @@ bool FlashGlyphStore::wipe() {
   if (!recordWipePending()) return false;
   const Geometry& g = geometry_;
   // Everything a lookup can reach goes first; the state sector, which holds the wipe word, goes last.
-  if (!eraseWritten(g.indexOffset, tableBytes(g.indexSlots)) || !eraseWritten(g.pairOffset, tableBytes(g.pairSlots)) ||
-      !eraseWritten(g.logOffset, g.logSize) || !flash_.erase(kStateSectorOffset, kSectorBytes)) {
+  if (!eraseWritten(g.indexOffset, tableBytes(g.indexSlots), "wipe: index") ||
+      !eraseWritten(g.pairOffset, tableBytes(g.pairSlots), "wipe: pairs") ||
+      !eraseWritten(g.logOffset, g.logSize, "wipe: log") ||
+      !eraseWritten(kStateSectorOffset, kSectorBytes, "wipe: state")) {
     LOG_ERR("GST", "wipe: erase failed; wipe stays pending");
     return false;
   }

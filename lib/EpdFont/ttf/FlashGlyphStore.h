@@ -179,9 +179,16 @@ class FlashGlyphStore {
   Commit writeBatch(GlyphBatch& batch);
   bool faceClaimed(uint32_t key) const { return (claimedFaces_ >> glyphstore::keyFaceIndex(key)) & 1u; }
   bool readFaceEntry(uint8_t i, glyphstore::FaceEntry& entry) const;
-  bool eraseWritten(uint32_t offset, uint32_t len);
+  /// Erases every sector of [offset, offset+len) that holds programmed bytes, in whole-sector runs,
+  /// naming the reason in the log: flash-health monitoring counts each run as a wear cycle.
+  bool eraseWritten(uint32_t offset, uint32_t len, const char* reason);
   bool isBlank(uint32_t sector) const;
   void stopWrites();
+  /// Logs one erase run (a wear cycle on those sectors) and adds it to the session totals.
+  void noteErase(const char* reason, uint32_t offset, uint32_t bytes);
+  /// Adds one successful program to the session totals; a milestone line names the buckets every
+  /// kProgramMilestoneBytes. Buckets are incremented by the call sites.
+  void noteProgram(uint32_t bytes);
   bool recordWipePending();
 
   NorFlash& flash_;
@@ -199,6 +206,20 @@ class FlashGlyphStore {
   uint32_t logUsed_ = 0;
   uint32_t usedSlots_ = 0;
   uint32_t noGlyphMarks_ = 0;  ///< session counter for the storm detector (markNoGlyph())
+  /// Session write/erase accounting for flash-health monitoring: one line per erase (a wear cycle)
+  /// and a close() summary. Reset with the other session state in close().
+  uint32_t eraseCalls_ = 0;
+  uint32_t eraseBytes_ = 0;
+  uint32_t progCalls_ = 0;
+  uint32_t progBytes_ = 0;
+  uint32_t progLogBytes_ = 0;     ///< glyph record appends
+  uint32_t progSlots_ = 0;        ///< glyph index slots
+  uint32_t progPairs_ = 0;        ///< kerning pair rows
+  uint32_t progFaces_ = 0;        ///< face claims
+  uint32_t progStyleBytes_ = 0;   ///< install: style block bytes
+  uint32_t progHeaderBytes_ = 0;  ///< install: the header flip
+  uint32_t progWipeWord_ = 0;     ///< the wipe-pending word
+  uint32_t progMilestone_ = 0;    ///< last milestone line's progBytes_ / kProgramMilestoneBytes
   uint32_t usedPairs_ = 0;
   uint32_t claimedFaces_ = 0;  // bit i: face entry i is claimed
   uint32_t generation_ = 0;
