@@ -3,6 +3,7 @@
 #if CROSSPOINT_KOREADER_AUTOSYNC
 
 #include <Arduino.h>
+#include <BookOrbitCatalogClient.h>
 #include <HalClock.h>
 #include <Logging.h>
 #include <WiFi.h>
@@ -14,14 +15,13 @@
 #include <atomic>
 #include <utility>
 
+#include "BookOrbitBookStateSync.h"
+#include "BookOrbitBookmarkSync.h"
+#include "BookOrbitReadingStatsSync.h"
 #include "CrossPointSettings.h"
 #include "WifiCredentialStore.h"
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
-#include "BookOrbitReadingStatsSync.h"
-#include <BookOrbitCatalogClient.h>
-#include "BookOrbitBookmarkSync.h"
-#include "BookOrbitBookStateSync.h"
 
 namespace {
 constexpr unsigned long AUTO_CONNECT_TIMEOUT_MS = 10000;
@@ -31,7 +31,6 @@ constexpr uint32_t BOOKMARK_ACK_IDLE_EXIT_MS = 15000;
 
 bool workerOwnsRadio = false;
 bool bookmarkRadioHeld = false;
-
 
 SemaphoreHandle_t slotMutex = nullptr;
 TaskHandle_t workerTask = nullptr;
@@ -104,9 +103,7 @@ bool connectToSavedNetwork(const unsigned long timeoutMs) {
   return true;
 }
 
-bool radioStillOursToTearDown() {
-  return WiFi.getMode() == WIFI_MODE_STA && !activityManager.wifiActivityOnStack();
-}
+bool radioStillOursToTearDown() { return WiFi.getMode() == WIFI_MODE_STA && !activityManager.wifiActivityOnStack(); }
 void releaseWorkerRadio() {
   if (workerOwnsRadio && radioStillOursToTearDown()) {
     WiFi.disconnect(false);
@@ -115,7 +112,6 @@ void releaseWorkerRadio() {
   workerOwnsRadio = false;
   bookmarkRadioHeld = false;
 }
-
 
 void runJob(KOReaderSyncJob& job) {
   job.bookmarkResponseReady = false;
@@ -213,8 +209,9 @@ void runJob(KOReaderSyncJob& job) {
     canExchange = result == BookOrbitCatalogClient::OK;
     job.bookmarkSucceeded = canExchange;
     if (!canExchange) {
-      LOG_ERR("KOSyncWorker", "Bookmark acknowledgment failed (%s)",
-              BookOrbitCatalogClient::errorString(result));
+      job.bookmarkError = static_cast<int>(result);
+      job.bookmarkHttpStatus = BookOrbitCatalogClient::lastHttpCode;
+      LOG_ERR("KOSyncWorker", "Bookmark acknowledgment failed (%s)", BookOrbitCatalogClient::errorString(result));
     }
   }
 
@@ -239,6 +236,8 @@ void runJob(KOReaderSyncJob& job) {
       job.bookmarkResponseReady = true;
     } else {
       job.bookmarkSucceeded = false;
+      job.bookmarkError = static_cast<int>(result);
+      job.bookmarkHttpStatus = BookOrbitCatalogClient::lastHttpCode;
       LOG_ERR("KOSyncWorker", "Bookmark exchange failed (%s)", BookOrbitCatalogClient::errorString(result));
     }
   }
@@ -250,8 +249,7 @@ void runJob(KOReaderSyncJob& job) {
 
 void syncWorkerTrampoline(void*) {
   for (;;) {
-    const TickType_t idleTimeout =
-        pdMS_TO_TICKS(bookmarkRadioHeld ? BOOKMARK_ACK_IDLE_EXIT_MS : WORKER_IDLE_EXIT_MS);
+    const TickType_t idleTimeout = pdMS_TO_TICKS(bookmarkRadioHeld ? BOOKMARK_ACK_IDLE_EXIT_MS : WORKER_IDLE_EXIT_MS);
     if (ulTaskNotifyTake(pdTRUE, idleTimeout) == 0) {
       bool exiting = false;
       {

@@ -7,16 +7,16 @@
 #include <HalClock.h>
 #include <HalStorage.h>
 #include <Logging.h>
-#include <esp_heap_caps.h>
 #include <esp_attr.h>
+#include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 
 #include <utility>
 
 #include "KOReaderCredentialStore.h"
 #include "KOReaderDocumentId.h"
-#include "KOReaderSyncMetadata.h"
 #include "KOReaderRetryPolicy.h"
+#include "KOReaderSyncMetadata.h"
 #include "KOReaderSyncWorker.h"
 
 AutoSyncState AutoSyncState::instance;
@@ -53,7 +53,6 @@ KOReaderSyncJob buildSilentPushJob(const std::string& epubPath, const KOReaderPo
 }
 
 KOReaderSyncJob pendingSleepPush;
-
 
 constexpr uint32_t RETRY_POLICY_MAGIC = 0x4B525031;  // "KRP1"
 
@@ -133,6 +132,9 @@ bool AutoSyncState::saveToFile() {
   doc["lastPushedPage"] = lastPushedPage;
   doc["pending"] = pending;
   doc["lastSyncFailed"] = lastSyncFailedFlag;
+  doc["lastFailureStage"] = lastFailureStage_;
+  doc["lastFailureError"] = lastFailureError_;
+  doc["lastFailureHttpStatus"] = lastFailureHttpStatus_;
   doc["lastSeenSpine"] = lastSeenSpine;
   doc["lastSeenPage"] = lastSeenPage;
   doc["turnsSincePush"] = turnsSincePush;
@@ -165,6 +167,9 @@ bool AutoSyncState::loadFromFile() {
   lastPushedPage = doc["lastPushedPage"] | -1;
   pending = doc["pending"] | false;
   lastSyncFailedFlag = doc["lastSyncFailed"] | false;
+  lastFailureStage_ = doc["lastFailureStage"] | static_cast<uint8_t>(FailureStage::None);
+  lastFailureError_ = doc["lastFailureError"] | static_cast<uint8_t>(KOReaderSyncClient::OK);
+  lastFailureHttpStatus_ = doc["lastFailureHttpStatus"] | 0;
   lastSeenSpine = doc["lastSeenSpine"] | -2;
   lastSeenPage = doc["lastSeenPage"] | -2;
   turnsSincePush = doc["turnsSincePush"] | 0;
@@ -202,11 +207,17 @@ void AutoSyncState::flush() {
   }
 }
 
-void AutoSyncState::markSyncFailed() {
+void AutoSyncState::markSyncFailed(const FailureStage stage, const KOReaderSyncClient::Error error,
+                                   const int httpStatus) {
+  // An existing failure keeps its first cause; the first failure is the one worth reporting.
   if (lastSyncFailedFlag) {
     return;
   }
   lastSyncFailedFlag = true;
+  lastFailureStage_ = static_cast<uint8_t>(stage);
+  lastFailureError_ = static_cast<uint8_t>(error);
+  // Kept in int16_t; HTTP status codes fit. Cast for the ArduinoJson | operator.
+  lastFailureHttpStatus_ = static_cast<int16_t>(httpStatus);
   saveToFile();
 }
 
@@ -216,6 +227,9 @@ void AutoSyncState::markSynced(const std::string& bookPath, const int spine, con
   const bool turnsDuringPush = turnsAtPushStart >= 0 && turnsSincePush > turnsAtPushStart;
   pending = turnsDuringPush && (lastSeenSpine != spine || lastSeenPage != page);
   lastSyncFailedFlag = false;
+  lastFailureStage_ = static_cast<uint8_t>(FailureStage::None);
+  lastFailureError_ = static_cast<uint8_t>(KOReaderSyncClient::OK);
+  lastFailureHttpStatus_ = 0;
   lastDocPath = bookPath;
   lastPushedSpine = spine;
   lastPushedPage = page;
@@ -274,10 +288,9 @@ void KOReaderAutoSync::recordAutomaticResult(const KOReaderSyncJob& job) {
                                       job.altResult == KOReaderSyncClient::OK &&
                                       outcome == KOReaderRetryPolicy::AttemptOutcome::COMPLETED;
   const KOReaderRetryPolicy::ResultClass result =
-      alternateFoundProgress
-          ? KOReaderRetryPolicy::ResultClass::SUCCESS
-          : KOReaderRetryPolicy::classify(job.result, job.kind == KOReaderSyncJob::FETCH_PROGRESS, job.httpStatus,
-                                          job.transportError, outcome);
+      alternateFoundProgress ? KOReaderRetryPolicy::ResultClass::SUCCESS
+                             : KOReaderRetryPolicy::classify(job.result, job.kind == KOReaderSyncJob::FETCH_PROGRESS,
+                                                             job.httpStatus, job.transportError, outcome);
   if (result == KOReaderRetryPolicy::ResultClass::NO_CHANGE) return;
   uint8_t failureCount = 0;
   uint32_t cooldownMinutes = 0;
@@ -287,8 +300,8 @@ void KOReaderAutoSync::recordAutomaticResult(const KOReaderSyncJob& job) {
   KOReaderRetryPolicy::record(retainedRetryPolicy.state, result, completedAtUs);
   if (result == KOReaderRetryPolicy::ResultClass::TRANSIENT_FAILURE) {
     failureCount = retainedRetryPolicy.state.failureCount;
-    cooldownMinutes = static_cast<uint32_t>(
-        KOReaderRetryPolicy::retryDelayUs(failureCount) / KOReaderRetryPolicy::MINUTE_US);
+    cooldownMinutes =
+        static_cast<uint32_t>(KOReaderRetryPolicy::retryDelayUs(failureCount) / KOReaderRetryPolicy::MINUTE_US);
   }
   retainedRetryPolicy.checksum = retryPolicyChecksum();
   portEXIT_CRITICAL(&retryPolicyMux);
@@ -302,7 +315,6 @@ void KOReaderAutoSync::recordAutomaticResult(const KOReaderSyncJob& job) {
             KOReaderSyncClient::errorString(job.result), job.httpStatus, job.transportError);
   }
 }
-
 
 bool KOReaderAutoSync::heapAllowsBackgroundSession(const char* what) {
   constexpr uint32_t caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
@@ -324,11 +336,9 @@ bool KOReaderAutoSync::intervalPushEnabled() {
   return KOREADER_STORE.hasCredentials() && KOREADER_STORE.getPushIntervalPages() > 0;
 }
 
-KOReaderSyncJob KOReaderAutoSync::makeSilentPushJob(const std::string& epubPath,
-                                                    const KOReaderPosition& localKoPos, const int spine,
-                                                    const int page, const std::string& title,
-                                                    const std::string& authors,
-                                                    const std::string& bookOrbitHash) {
+KOReaderSyncJob KOReaderAutoSync::makeSilentPushJob(const std::string& epubPath, const KOReaderPosition& localKoPos,
+                                                    const int spine, const int page, const std::string& title,
+                                                    const std::string& authors, const std::string& bookOrbitHash) {
   return buildSilentPushJob(epubPath, localKoPos, spine, page, title, authors, bookOrbitHash);
 }
 
@@ -353,12 +363,11 @@ uint64_t KOReaderAutoSync::pushSilentAsync(KOReaderSyncJob&& job) {
   return seq;
 }
 
-
 bool KOReaderAutoSync::finalizeSilentPush(const KOReaderSyncJob& job) {
   if (job.kind != KOReaderSyncJob::SILENT_PUSH) return false;
   if (job.result != KOReaderSyncClient::OK) {
     LOG_INF("AutoSync", "Silent push failed: %s", KOReaderSyncClient::errorString(job.result));
-    AUTOSYNC_STATE.markSyncFailed();
+    AUTOSYNC_STATE.markSyncFailed(AutoSyncState::FailureStage::Push, job.result, job.httpStatus);
     return false;
   }
   AUTOSYNC_STATE.markSynced(job.path, job.spine, job.page, job.turnsSincePushAtStart);
@@ -379,7 +388,6 @@ bool KOReaderAutoSync::stashSleepPush(KOReaderSyncJob&& job) {
   pendingSleepPush = std::move(job);
   return true;
 }
-
 
 uint64_t KOReaderAutoSync::pushStashedSleepPushAsync() {
   if (pendingSleepPush.path.empty()) return 0;
@@ -418,7 +426,7 @@ void KOReaderAutoSync::joinStashedSleepPush(const uint64_t postedSeq) {
     pendingSleepPush = KOReaderSyncJob{};
     if (!posted) {
       LOG_DBG("AutoSync", "Sleep push retry timed out; deferring to the next boundary");
-      AUTOSYNC_STATE.markSyncFailed();
+      AUTOSYNC_STATE.markSyncFailed(AutoSyncState::FailureStage::PushDeferred);
       return;
     }
     const unsigned long elapsed = millis() - start;
@@ -426,7 +434,7 @@ void KOReaderAutoSync::joinStashedSleepPush(const uint64_t postedSeq) {
   }
   if (!KOReaderSyncWorker::waitFor(seq, budget)) {
     LOG_DBG("AutoSync", "Sleep push still running at the join deadline; deferring to the next boundary");
-    AUTOSYNC_STATE.markSyncFailed();
+    AUTOSYNC_STATE.markSyncFailed(AutoSyncState::FailureStage::PushDeferred);
     return;
   }
   if (finalizeSilentPush(seq)) {

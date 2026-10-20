@@ -3,7 +3,9 @@
 #include <GfxRenderer.h>
 #include <I18n.h>
 
+#include "KOReaderAutoSync.h"
 #include "KOReaderCredentialStore.h"
+#include "KOReaderSyncClient.h"
 #include "MappedInputManager.h"
 #include "SdCardFontGlobals.h"
 #include "activities/settings/SettingActionDispatch.h"
@@ -53,6 +55,54 @@ std::string defaultFontFamilyLabel(const SettingInfo& item) {
   // in CrossPointSettings::FONT_FAMILY order.
   return item.getEnumOptionLabel(static_cast<uint8_t>(SETTINGS.fontFamily + 1));
 }
+
+#if CROSSPOINT_KOREADER_AUTOSYNC
+// One-line reason for the last failed (or successful) sync, shown as the value of the Sync
+// tab's "Last sync" row. Combines the persisted failure stage with the KOReader client error
+// and HTTP status recorded when the failure happened. Non-KOReader errors (bookmark exchange,
+// apply, deferrals) describe the stage itself.
+std::string lastSyncStatusText() {
+  if (!AUTOSYNC_STATE.lastSyncFailed()) {
+    return tr(STR_LAST_SYNC_OK);
+  }
+  const char* stage = tr(STR_LAST_SYNC_STAGE_MANUAL);
+  switch (AUTOSYNC_STATE.lastFailureStage()) {
+    case AutoSyncState::FailureStage::Pull:
+      stage = tr(STR_LAST_SYNC_STAGE_PULL);
+      break;
+    case AutoSyncState::FailureStage::Push:
+      stage = tr(STR_LAST_SYNC_STAGE_PUSH);
+      break;
+    case AutoSyncState::FailureStage::PushDeferred:
+      stage = tr(STR_LAST_SYNC_STAGE_PUSH_DEFERRED);
+      break;
+    case AutoSyncState::FailureStage::Bookmark:
+      stage = tr(STR_LAST_SYNC_STAGE_BOOKMARK);
+      break;
+    case AutoSyncState::FailureStage::BookmarkApply:
+      stage = tr(STR_LAST_SYNC_STAGE_BOOKMARK_APPLY);
+      break;
+    case AutoSyncState::FailureStage::ManualPreFlight:
+    case AutoSyncState::FailureStage::None:
+      break;
+  }
+  std::string reason = stage;
+  const auto error = AUTOSYNC_STATE.lastFailureError();
+  if (error != KOReaderSyncClient::OK) {
+    reason += ": ";
+    reason += KOReaderSyncClient::errorString(error);
+    const int http = AUTOSYNC_STATE.lastFailureHttpStatus();
+    if (http > 0) {
+      char httpBuf[16];
+      snprintf(httpBuf, sizeof(httpBuf), " (HTTP %d)", http);
+      reason += httpBuf;
+    }
+  }
+  char line[96];
+  snprintf(line, sizeof(line), tr(STR_LAST_SYNC_FAILED), reason.c_str());
+  return std::string(line);
+}
+#endif  // CROSSPOINT_KOREADER_AUTOSYNC
 }  // namespace
 
 ReaderSizeList EpubReaderMenuActivity::pendingSizeList() const {
@@ -101,7 +151,7 @@ void EpubReaderMenuActivity::buildMenuItems(bool hasFootnotes, bool hasStarredPa
   auto& toolsItems = tabMenuItems[static_cast<size_t>(MenuTab::Tools)];
   navigationItems.reserve(8);
   settingsItems.reserve(13);
-  syncItems.reserve(3);
+  syncItems.reserve(4);
   toolsItems.reserve(8);
 
   visibleTabs[visibleTabCount++] = MenuTab::Navigation;
@@ -364,6 +414,11 @@ void EpubReaderMenuActivity::buildMenuItems(bool hasFootnotes, bool hasStarredPa
       }));
 
   if (KOREADER_STORE.hasCredentials()) {
+#if CROSSPOINT_KOREADER_AUTOSYNC
+    // Read-only status row: the reason the last sync failed (or that it succeeded). Selecting
+    // it does nothing, like the separators.
+    syncItems.push_back(SettingInfo::Action(StrId::STR_LAST_SYNC, SettingAction::None));
+#endif
     syncItems.push_back(SettingInfo::Action(StrId::STR_PULL_PROGRESS_FROM_OTHER_DEVICES, SettingAction::None));
     syncItems.push_back(SettingInfo::Action(StrId::STR_PUSH_PROGRESS_FROM_THIS_DEVICE, SettingAction::None));
     // The same comparison a long Confirm press in the reader starts: show which side is further and
@@ -463,6 +518,11 @@ void EpubReaderMenuActivity::finishWithAction(MenuAction action) {
 void EpubReaderMenuActivity::onActionSelected(int index) {
   const auto& item = activeMenuItems()[index];
 
+  // Read-only status row: no action, keep the menu open.
+  if (item.nameId == StrId::STR_LAST_SYNC) {
+    return;
+  }
+
   // Auto page turn cycles locally (not a DynamicEnum because labels are raw strings)
   if (item.nameId == StrId::STR_AUTO_TURN_PAGES_PER_MIN) {
     selectedPageTurnOption = (selectedPageTurnOption + 1) % 5;
@@ -517,6 +577,13 @@ std::string EpubReaderMenuActivity::getItemValueString(int index) const {
   if (item.nameId == StrId::STR_STAR_PAGE) {
     return currentPageStarred ? std::string(tr(STR_STATE_ON)) : std::string(tr(STR_STATE_OFF));
   }
+
+#if CROSSPOINT_KOREADER_AUTOSYNC
+  // Last sync status: read-only row whose value is the failure reason (or success note).
+  if (item.nameId == StrId::STR_LAST_SYNC) {
+    return lastSyncStatusText();
+  }
+#endif
 
   if (item.type == SettingType::ACTION) {
     return {};

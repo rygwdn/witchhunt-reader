@@ -7,9 +7,9 @@
 
 #include <utility>
 
+#include "BookOrbitBookmarkSync.h"
 #include "CrossPointState.h"
 #include "KOReaderCredentialStore.h"
-#include "BookOrbitBookmarkSync.h"
 #include "KOReaderDocumentId.h"
 #include "ProgressComparison.h"
 #include "ReadingSessionTracker.h"
@@ -86,15 +86,14 @@ KOReaderPosition EpubReaderActivity::currentKoPosition(const int page, const int
   return ProgressMapper::toKOReader(epub, pos);
 }
 
-
 void EpubReaderActivity::prepareAutoBookmarkSnapshot(KOReaderSyncJob& job, const size_t changeOffset) {
   if (!epub || bookOrbitHash_.empty() || !KOREADER_STORE.hasCredentials() || !KOREADER_STORE.getCatalogCapable()) {
     return;
   }
   size_t totalChanges = 0;
   uint32_t revision = 0;
-  if (!BookOrbitBookmarkSync::prepareExchange(bookmarkStore, epub, bookOrbitHash_, changeOffset,
-                                              job.bookmarkExchange, totalChanges, revision)) {
+  if (!BookOrbitBookmarkSync::prepareExchange(bookmarkStore, epub, bookOrbitHash_, changeOffset, job.bookmarkExchange,
+                                              totalChanges, revision)) {
     LOG_ERR("AutoSync", "Bookmark snapshot failed for %s", epub->getPath().c_str());
     return;
   }
@@ -126,7 +125,8 @@ bool EpubReaderActivity::handleAutoBookmarkResponse(KOReaderSyncJob& job, const 
     return false;
   }
   if (!job.bookmarkSucceeded || !job.bookmarkResponseReady) {
-    AUTOSYNC_STATE.markSyncFailed();
+    AUTOSYNC_STATE.markSyncFailed(AutoSyncState::FailureStage::Bookmark,
+                                  static_cast<KOReaderSyncClient::Error>(job.bookmarkError), job.bookmarkHttpStatus);
     return false;
   }
 
@@ -135,17 +135,18 @@ bool EpubReaderActivity::handleAutoBookmarkResponse(KOReaderSyncJob& job, const 
   bool applied = false;
   if (bookmarkStore.revision() == job.bookmarkRevision) {
     BookOrbitBookmarkSync::ApplyResult result;
-    applied = BookOrbitBookmarkSync::applyResponse(bookmarkStore, epub, epub->getPath(), epub->getCachePath(),
-                                                   epub->getTitle(), job.bookmarkRevision, job.bookmarkResponse, result);
+    applied =
+        BookOrbitBookmarkSync::applyResponse(bookmarkStore, epub, epub->getPath(), epub->getCachePath(),
+                                             epub->getTitle(), job.bookmarkRevision, job.bookmarkResponse, result);
     if (applied && (!result.ack.applied.empty() || !result.ack.deleted.empty())) {
       next.hasBookmarkAck = true;
       next.bookmarkAck = std::move(result.ack);
     }
     if (result.positionFailure) {
-      AUTOSYNC_STATE.markSyncFailed();
+      AUTOSYNC_STATE.markSyncFailed(AutoSyncState::FailureStage::BookmarkApply);
     }
     if (!applied) {
-      AUTOSYNC_STATE.markSyncFailed();
+      AUTOSYNC_STATE.markSyncFailed(AutoSyncState::FailureStage::BookmarkApply);
     }
   } else {
     LOG_INF("AutoSync", "Bookmark response superseded by local edits; not applying or acknowledging");
@@ -309,7 +310,7 @@ bool EpubReaderActivity::evaluateAutoSyncPull() {
   }
   if (result != KOReaderSyncClient::OK) {
     LOG_INF("AutoSync", "Wake pull failed (%s); keeping current position", KOReaderSyncClient::errorString(result));
-    AUTOSYNC_STATE.markSyncFailed();
+    AUTOSYNC_STATE.markSyncFailed(AutoSyncState::FailureStage::Pull, result, KOReaderSyncClient::lastHttpCode);
     return false;
   }
 
@@ -372,9 +373,9 @@ void EpubReaderActivity::silentUploadCurrentPosition() {
     return;
   }
   const KOReaderPosition local = currentKoPosition(page, total);
-  KOReaderSyncJob job = KOReaderAutoSync::makeSilentPushJob(epub->getPath(), local, currentSpineIndex, page,
-                                                           epub->getTitle(), epub->getAuthor(),
-                                                           globalReadingSessionTracker().getBookOrbitHash());
+  KOReaderSyncJob job =
+      KOReaderAutoSync::makeSilentPushJob(epub->getPath(), local, currentSpineIndex, page, epub->getTitle(),
+                                          epub->getAuthor(), globalReadingSessionTracker().getBookOrbitHash());
   prepareAutoBookmarkSnapshot(job);
   autoSyncPushSeq = KOReaderAutoSync::pushSilentAsync(std::move(job));
 }
@@ -450,9 +451,9 @@ void EpubReaderActivity::maybeAutoPushInterval() {
   }
   const KOReaderPosition local = currentKoPosition(page, total);
   autoSyncLastPushAt = millis();
-  KOReaderSyncJob job = KOReaderAutoSync::makeSilentPushJob(epub->getPath(), local, currentSpineIndex, page,
-                                                           epub->getTitle(), epub->getAuthor(),
-                                                           globalReadingSessionTracker().getBookOrbitHash());
+  KOReaderSyncJob job =
+      KOReaderAutoSync::makeSilentPushJob(epub->getPath(), local, currentSpineIndex, page, epub->getTitle(),
+                                          epub->getAuthor(), globalReadingSessionTracker().getBookOrbitHash());
   prepareAutoBookmarkSnapshot(job);
   autoSyncPushSeq = KOReaderAutoSync::pushSilentAsync(std::move(job));
 }
@@ -480,7 +481,8 @@ void EpubReaderActivity::pollAutoBookmarkJob() {
   if (job.bookmarkResponseReady) {
     handleAutoBookmarkResponse(job);
   } else if (job.result != KOReaderSyncClient::OK || !job.bookmarkSucceeded) {
-    AUTOSYNC_STATE.markSyncFailed();
+    AUTOSYNC_STATE.markSyncFailed(AutoSyncState::FailureStage::Bookmark,
+                                  static_cast<KOReaderSyncClient::Error>(job.bookmarkError), job.bookmarkHttpStatus);
   }
 }
 
@@ -530,7 +532,6 @@ void EpubReaderActivity::serviceAutoSync() {
   AUTOSYNC_STATE.noteProgress(path, spine, page);
   maybeAutoPushInterval();
 }
-
 
 void EpubReaderActivity::releaseAutoSyncSlot() {
   if (autoSyncPushSeq != 0 && KOReaderSyncWorker::isDone(autoSyncPushSeq)) {
@@ -587,9 +588,9 @@ void EpubReaderActivity::maybeAutoPushOnSleep() {
 
   saveProgress(currentSpineIndex, page, total);
   const KOReaderPosition local = currentKoPosition(page, total);
-  KOReaderSyncJob job = KOReaderAutoSync::makeSilentPushJob(epub->getPath(), local, currentSpineIndex, page,
-                                                           epub->getTitle(), epub->getAuthor(),
-                                                           globalReadingSessionTracker().getBookOrbitHash());
+  KOReaderSyncJob job =
+      KOReaderAutoSync::makeSilentPushJob(epub->getPath(), local, currentSpineIndex, page, epub->getTitle(),
+                                          epub->getAuthor(), globalReadingSessionTracker().getBookOrbitHash());
   prepareAutoBookmarkSnapshot(job);
   KOReaderAutoSync::stashSleepPush(std::move(job));
 }

@@ -1,5 +1,6 @@
 #include "KOReaderSyncActivity.h"
 
+#include <BookOrbitCatalogClient.h>
 #include <FontCacheManager.h>
 #include <GfxRenderer.h>
 #include <HalClock.h>
@@ -15,13 +16,16 @@
 #include <cstddef>
 #include <new>
 
+#include "BookOrbitBookStateSync.h"
+#include "BookOrbitBookmarkSync.h"
+#include "BookOrbitReadingStatsSync.h"
+#include "BookmarkStore.h"
 #include "CrossPointSettings.h"
 #include "KOReaderAutoSync.h"
 #include "KOReaderCredentialStore.h"
 #include "KOReaderDocumentId.h"
 #include "KOReaderSyncMetadata.h"
 #include "KOReaderSyncWorker.h"
-#include "BookOrbitBookStateSync.h"
 #include "MappedInputManager.h"
 #include "SilentRestart.h"
 #include "activities/NetworkMemoryTrim.h"
@@ -30,10 +34,6 @@
 #include "components/UITheme.h"
 #include "components/themes/ListTouchBand.h"
 #include "fontIds.h"
-#include "BookOrbitReadingStatsSync.h"
-#include <BookOrbitCatalogClient.h>
-#include "BookOrbitBookmarkSync.h"
-#include "BookmarkStore.h"
 
 namespace {
 constexpr time_t NTP_RESYNC_MIN_INTERVAL_SEC = 15 * 60;
@@ -344,7 +344,7 @@ void KOReaderSyncActivity::syncBookmarks() {
     if (!ensureEpubLoadedForMapping()) return;
     BookOrbitBookmarkSync::ApplyResult applied;
     if (!BookOrbitBookmarkSync::applyResponse(store, epub, epubPath, epub->getCachePath(), epub->getTitle(), revision,
-                                               response.results.front(), applied)) {
+                                              response.results.front(), applied)) {
       LOG_ERR("KOSync", "Bookmark response could not be durably applied for %s", epubPath.c_str());
       releaseEpubForMapping();
       return;
@@ -406,6 +406,10 @@ bool KOReaderSyncActivity::handleAutoPushPreflight() {
         statusMessage += detail;
       }
     }
+#if CROSSPOINT_KOREADER_AUTOSYNC
+    AUTOSYNC_STATE.markSyncFailed(AutoSyncState::FailureStage::ManualPreFlight, warmupResult,
+                                  KOReaderSyncClient::lastHttpCode);
+#endif
     requestUpdate(true);
     return false;
   }
@@ -471,8 +475,7 @@ void KOReaderSyncActivity::performFetchAndCompare() {
   }
 
 #if CROSSPOINT_KOREADER_AUTOSYNC
-  if (result == KOReaderSyncClient::OK &&
-      syncIntent != KOReaderSyncIntentState::AUTO_PULL) {
+  if (result == KOReaderSyncClient::OK && syncIntent != KOReaderSyncIntentState::AUTO_PULL) {
     KOReaderAutoSync::resetRetryPolicy();
   }
 #endif
@@ -513,6 +516,9 @@ void KOReaderSyncActivity::performFetchAndCompare() {
 
   if (result != KOReaderSyncClient::OK) {
     KOReaderSyncClient::endPersistentSession();
+#if CROSSPOINT_KOREADER_AUTOSYNC
+    AUTOSYNC_STATE.markSyncFailed(AutoSyncState::FailureStage::Pull, result, KOReaderSyncClient::lastHttpCode);
+#endif
     {
       RenderLock lock(*this);
       state = SYNC_FAILED;
@@ -741,6 +747,9 @@ void KOReaderSyncActivity::performUpload() {
   if (result != KOReaderSyncClient::OK) {
     // Drop the radio while user reads the result; full teardown happens at silent reboot.
     esp_wifi_stop();
+#if CROSSPOINT_KOREADER_AUTOSYNC
+    AUTOSYNC_STATE.markSyncFailed(AutoSyncState::FailureStage::Push, result, KOReaderSyncClient::lastHttpCode);
+#endif
     {
       RenderLock lock(*this);
       state = SYNC_FAILED;
@@ -865,7 +874,9 @@ void KOReaderSyncActivity::onExit() {
   Activity::onExit();
 #if CROSSPOINT_KOREADER_AUTOSYNC
   if (state == SYNC_FAILED) {
-    AUTOSYNC_STATE.markSyncFailed();
+    // Stage not known here (hash failure, apply failure); the specific sites already recorded
+    // their stage before entering SYNC_FAILED, so this only backstops states without one.
+    AUTOSYNC_STATE.markSyncFailed(AutoSyncState::FailureStage::ManualPreFlight);
   }
 #endif
 

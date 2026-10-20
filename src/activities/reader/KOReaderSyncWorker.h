@@ -4,13 +4,13 @@
 
 #if CROSSPOINT_KOREADER_AUTOSYNC
 
+#include <BookOrbitBookmarkTypes.h>
+
 #include <cstddef>
 #include <cstdint>
 #include <string>
 
 #include "KOReaderSyncClient.h"
-#include <BookOrbitBookmarkTypes.h>
-
 
 struct KOReaderSyncJob {
   enum Kind { FETCH_PROGRESS, SILENT_PUSH, BOOKMARK_CONTINUE };
@@ -39,6 +39,11 @@ struct KOReaderSyncJob {
   KOReaderProgress remote;
   KOReaderSyncClient::Error altResult = KOReaderSyncClient::NOT_FOUND;
   KOReaderProgress altRemote;
+  // Bookmark exchange/acknowledgment outcome (BookOrbitCatalogClient::Error); valid only when
+  // bookmarkSucceeded is false and a bookmark request was attempted. Lets the failure record
+  // say "bookmark sync failed" with its own cause instead of folding into the KOReader error.
+  int bookmarkError = 0;
+  int bookmarkHttpStatus = 0;
 
   bool hasBookmarkExchange = false;
   bool hasBookmarkAck = false;
