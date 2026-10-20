@@ -250,6 +250,7 @@ void FlashGlyphStore::close() {
   region_ = index_ = pairs_ = log_ = nullptr;
   geometry_ = Geometry{};
   logUsed_ = usedSlots_ = usedPairs_ = claimedFaces_ = 0;
+  noGlyphMarks_ = 0;
   open_ = false;
   wipePending_ = false;
   writesStopped_ = false;
@@ -496,12 +497,22 @@ FlashGlyphStore::Commit FlashGlyphStore::writeBatch(GlyphBatch& batch) {
   return Commit::Stored;
 }
 
+/// No-glyph marks in one session before the storm detector names the accumulation (markNoGlyph()).
+constexpr uint32_t kNoGlyphStormMarks = 64;
+
 FlashGlyphStore::Commit FlashGlyphStore::markNoGlyph(const uint32_t key) {
   if (!open_ || !isGlyphKey(key) || !faceClaimed(key)) return Commit::Refused;
   if (writesStopped_) return Commit::Full;
   if (usedSlots_ + 1 > limit(geometry_.indexSlots, kIndexLoadPercent)) {
     stopWrites();
     return Commit::Full;
+  }
+  // A session that marks this many codepoints as no glyph has usually answered lookups from a
+  // broken block (a torn copy, a window that does not hold the table): the marks are permanent in
+  // flash, so body glyphs would draw blank in every later session. Name the accumulation once.
+  if (++noGlyphMarks_ == kNoGlyphStormMarks) {
+    LOG_ERR("GST", "%u no-glyph marks this session: if glyphs later draw blank, the store answered from broken bytes",
+            static_cast<unsigned>(noGlyphMarks_));
   }
   return insertGlyphSlot(key, kNoGlyph);
 }
@@ -641,6 +652,7 @@ bool FlashGlyphStore::wipe() {
     return false;
   }
   logUsed_ = usedSlots_ = usedPairs_ = claimedFaces_ = 0;
+  noGlyphMarks_ = 0;
   ++generation_;
   wipePending_ = false;
   writesStopped_ = false;

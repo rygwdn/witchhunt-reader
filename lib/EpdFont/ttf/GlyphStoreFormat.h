@@ -30,7 +30,10 @@ constexpr uint32_t kMagic = 0x54545043;  // "CPTT"
 /// 3: the mode is a style block's, not the store's (2c-4): StyleInfo holds it, and in SD mode the file the outlines
 /// come from and where they are; Geometry lost its mode, StyleInfo its table map. An older store reads as not
 /// installed and is installed over.
-constexpr uint16_t kFormatVersion = 3;
+/// 4: no layout change. Permanent no-glyph records written before the mark discipline (a transient "read past the
+/// mapped bytes" or a bad first-use answer became a permanent blank) may lie in an existing store; an older one
+/// reads as not installed and is installed over, which empties the log with them.
+constexpr uint16_t kFormatVersion = 4;
 constexpr uint8_t kModeFlash = 0;  ///< a style block holds the style's whole TTF
 constexpr uint8_t kModeSd = 1;     ///< it holds the tables; the outlines are read from the TTF file on the SD card
 /// Style blocks of every family together: two families of four, or a body of four and four one-style accent

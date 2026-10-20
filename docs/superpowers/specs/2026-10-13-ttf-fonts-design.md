@@ -601,6 +601,7 @@ See section 11 for the full deferred list.
 | Situation | Behaviour |
 |---|---|
 | The font has no glyph for the codepoint | A slot with the "missing" marker; the replacement glyph is drawn as today. |
+| The glyph *lookup* reads past the mapped bytes (`out of range`: a read outside the style block or the card file) | Drawn as missing this time, **not** marked, retried at the next lookup: the window, not the font, may be the wrong one. The first few name themselves in the log. |
 | A permanent load failure (`Unsupported` or `Malformed`: point matching, over a cap, an out-of-range read in the outline, an advance or position `EpdGlyph` cannot hold) | A slot with the "missing" marker; logged once. |
 | A transient failure (`Transient`: an SD I/O error, no scratch block, or a size above the one the scratch block was planned for) | Drawn as missing this time, **not** marked, retried at the next lookup. |
 

@@ -326,6 +326,9 @@ class TtfFontSet {
   void freeRing();
   bool ownsBitmap(const EpdGlyph* glyph, const uint8_t*& bitmap) const;
   void failed(uint8_t style, uint32_t codepoint, const ttf::Status status, const bool haveKey, const uint32_t key);
+  /// A lookup that found no glyph only because a table read fell outside the mapped bytes. Nothing
+  /// is stored (it is not a fact about the font), and the first few name themselves in the log.
+  void noteBrokenWindow(uint32_t codepoint);
   void noteCommit(FlashGlyphStore::Commit result);
   uint32_t batchCapacity() const { return rasterizer_.plan().outputBytes; }
   bool beginMiss();
@@ -357,4 +360,5 @@ class TtfFontSet {
 
   Pending pending_[kPrefetchGlyphs] = {};
   uint8_t failuresLogged_ = 0;
+  uint8_t brokenWindowsLogged_ = 0;
 };

@@ -93,7 +93,7 @@ fonts need.
 | Magic | Written by | Version | Contents |
 |---|---|---|---|
 | `CPFC` | `FlashFontPartition` | none | A `.cpfont` family copied from the card, mapped in place. See [contributing/font-cache-structures.md](contributing/font-cache-structures.md) |
-| `CPTT` | `FlashGlyphStore` | `glyphstore::kFormatVersion` (3) | The TTF glyph store: [below](#the-ttf-glyph-store-cptt) |
+| `CPTT` | `FlashGlyphStore` | `glyphstore::kFormatVersion` (4) | The TTF glyph store: [below](#the-ttf-glyph-store-cptt) |
 
 ## `book.bin`
 
@@ -544,7 +544,10 @@ produces; a power cut leaves at worst bytes nothing references.
 
 Version 1 held one family: four style blocks, and a size table of bare ppems with pairs keyed by style alone.
 Version 2 had the mode in the `Geometry`, the store's, and a table map in each `StyleInfo` (1,240 B headers).
-An older header reads as not installed, so the first load installs the set over it.
+Version 3 moved the mode into each `StyleInfo`, with the SD-mode file and outlines beside it.
+Version 4 changed no layout: a store of it marks a codepoint as no glyph only when the lookup itself answered
+(a read past the mapped bytes is drawn as missing instead, and never marked); an older store may hold permanent
+no-glyph marks written from such a read, and reads as not installed, so the first load installs the set over it.
 
 ## `bookorbit/catalog.bin`
 

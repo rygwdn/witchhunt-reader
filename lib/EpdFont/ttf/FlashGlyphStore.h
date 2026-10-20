@@ -198,6 +198,7 @@ class FlashGlyphStore {
   uint8_t firstSd_ = 0;  // the first SD-mode block; styleCount() when none
   uint32_t logUsed_ = 0;
   uint32_t usedSlots_ = 0;
+  uint32_t noGlyphMarks_ = 0;  ///< session counter for the storm detector (markNoGlyph())
   uint32_t usedPairs_ = 0;
   uint32_t claimedFaces_ = 0;  // bit i: face entry i is claimed
   uint32_t generation_ = 0;

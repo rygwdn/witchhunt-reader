@@ -76,8 +76,9 @@ TEST(GlyphStoreFormat, HomeSlotStaysInRangeForAnySlotCount) {
 }
 
 TEST(GlyphStoreFormat, HeaderLayoutIsStable) {
-  // Bump kFormatVersion when any of these change.
-  EXPECT_EQ(3u, kFormatVersion);
+  // Bump kFormatVersion when any of these change. 4: no layout change; it invalidates stores whose
+  // permanent no-glyph marks were written before the mark discipline (see GlyphStoreFormat.h).
+  EXPECT_EQ(4u, kFormatVersion);
   EXPECT_EQ(312u, sizeof(Header));
   EXPECT_EQ(308u, offsetof(Header, check));
   EXPECT_EQ(32u, sizeof(StyleInfo));

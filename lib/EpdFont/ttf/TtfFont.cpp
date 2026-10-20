@@ -430,7 +430,7 @@ uint32_t TtfFontSet::missMemoryBytes() const {
 }
 
 uint32_t TtfFontSet::releaseMissMemory() {
-  missesStarved_ = false;                                                      // the next pass asks the heap again
+  missesStarved_ = false;  // the next pass asks the heap again
   if (!rasterizer_.allocated() && !sdPagesStorage_.valid() && ringBytes() == 0) return 0;
   const uint32_t freed = missMemoryBytes();
   rasterizer_.release();
@@ -511,6 +511,17 @@ void TtfFontSet::failed(const uint8_t style, const uint32_t codepoint, const ttf
     LOG_INF("TTF", "U+%04lX style %u: %s, drawn as missing", static_cast<unsigned long>(codepoint), style,
             ttf::statusName(status));
   }
+}
+
+void TtfFontSet::noteBrokenWindow(const uint32_t codepoint) {
+  (void)codepoint;  // only logged, and logging may be compiled out
+  // A read fell outside the mapped bytes, so "no glyph" is not a fact about the font. Nothing is
+  // stored: the mark would outlive the broken window in flash and blank the glyph in every later
+  // session (observed: a book font's first session left most of its repertoire permanently blank).
+  if (brokenWindowsLogged_ >= kMaxFailuresLogged) return;
+  ++brokenWindowsLogged_;
+  LOG_ERR("TTF", "U+%04lX: a table read fell outside the mapped bytes; drawn as missing, not marked",
+          static_cast<unsigned long>(codepoint));
 }
 
 void TtfFontSet::noteCommit(const Commit result) {
@@ -778,8 +789,15 @@ const EpdGlyph* TtfFont::render(const Size& size, const uint8_t style, const uin
   const ttf::Face& face = drawn.face;
   const uint16_t index = drawn.ligatures.glyphFor(bytes, face, codepoint);
   if (index == 0) {
-    // The font has no glyph for it. An I/O error is not an answer (SD mode): ask again next time.
-    if (haveKey && !set.ringMode_ && !bytes.ioError()) set.noteCommit(set.store_.markNoGlyph(key));
+    // The font has no glyph for it. Neither an I/O error nor a read past the mapped bytes is an
+    // answer: both say nothing about the font, and a mark here would blank the glyph permanently
+    // in every later session. Ask again the next time.
+    if (haveKey && !set.ringMode_ && !bytes.ioError()) {
+      if (bytes.outOfRange())
+        set.noteBrokenWindow(codepoint);
+      else
+        set.noteCommit(set.store_.markNoGlyph(key));
+    }
     return nullptr;
   }
   // A glyph to draw: in what the set's first miss makes (spec 5.3).
@@ -889,7 +907,12 @@ void TtfFont::prefetch(Size& size, const uint8_t style, const char* utf8Text) {
     }
     const uint16_t index = drawn.ligatures.glyphFor(bytes, face, cp);
     if (index == 0) {
-      if (!bytes.ioError()) set.noteCommit(store.markNoGlyph(key));
+      if (!bytes.ioError()) {
+        if (bytes.outOfRange())
+          set.noteBrokenWindow(cp);
+        else
+          set.noteCommit(store.markNoGlyph(key));
+      }
       if (set.ringMode_) return;
       continue;
     }
