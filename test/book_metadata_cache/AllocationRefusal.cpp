@@ -1,6 +1,11 @@
 #include "AllocationRefusal.h"
 
+#if defined(__APPLE__)
+#include <malloc/malloc.h>
+#define malloc_usable_size(p) malloc_size(p)
+#else
 #include <malloc.h>
+#endif
 
 #include <cstdlib>
 #include <new>

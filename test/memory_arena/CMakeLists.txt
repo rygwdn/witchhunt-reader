@@ -5,8 +5,10 @@ add_executable(BuildArenaTest
 
 target_include_directories(BuildArenaTest PRIVATE
   ${REPO_ROOT}/lib/Memory
-  # The settable esp_heap_caps.h host stub PassTable sizes its heap tables from.
+  # The settable esp_heap_caps.h host stub PassTable sizes its heap tables from;
+  # its HostFreeHeap routes through ESP.setFreeHeap in the Arduino shims.
   ${REPO_ROOT}/test/epub_pipeline
+  ${REPO_ROOT}/test/shims
 )
 
 target_link_libraries(BuildArenaTest PRIVATE
