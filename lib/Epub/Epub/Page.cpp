@@ -415,6 +415,23 @@ bool Page::renderTextOnly(GfxRenderer& renderer, const int fontId, const int xOf
 }
 
 bool Page::serialize(FsFile& file) const {
+  // Heap corruption guard (crash 2026-10-19, spine 36 build): a smashed vector's begin pointer
+  // read as 8 and the footnote write faulted in the ROM memcpy (LoadProhibited). No real
+  // allocation lives below 4 KiB on any target (host heap, ESP32 internal RAM, PSRAM), so a
+  // begin that low means this Page's heap block was overwritten. Refuse the page instead of
+  // faulting or writing garbage into the cache file: onPageComplete turns the false return into
+  // a clean, logged build failure and the page is rebuilt.
+  const auto plausible = [](const void* begin) {
+    return reinterpret_cast<uintptr_t>(begin) >= 0x1000;
+  };
+  if ((elements.size() > 0 && !plausible(elements.data())) ||
+      (footnotes.size() > 0 && !plausible(footnotes.data()))) {
+    LOG_ERR("PGE", "Page vector corrupt (elements size=%u data=%p, footnotes size=%u data=%p); refusing the page",
+            static_cast<unsigned>(elements.size()), static_cast<const void*>(elements.data()),
+            static_cast<unsigned>(footnotes.size()), static_cast<const void*>(footnotes.data()));
+    return false;
+  }
+
   // Clamped to what deserialize() accepts; the overflow is reported by Section::onPageComplete.
   const uint16_t count = static_cast<uint16_t>(std::min<size_t>(elements.size(), MAX_ELEMENTS));
   serialization::writePod(file, count);
