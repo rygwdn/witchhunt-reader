@@ -114,6 +114,12 @@ const std::vector<Hyphenator::BreakInfo> hyphenatorBreaks =
     Hyphenator::breakOffsets(word, allowFallbackBreaks, typography_.hyphenator);
 ```
 
+`test/epub_pipeline/BookLanguageTest.cpp` covers it on the host: two builds in English and in German,
+interleaved slice by slice, must each produce the layout of their own language. The English and the
+German patterns break the fixture's word at no place in common, so the layouts differ whenever the
+language reaches the layout, and the interleaved build must reproduce its own language's layout. With
+the old global the interleaved English build came out with the German break points.
+
 ## How it is verified
 
 `scripts/check_book_language.sh` drives the whole path in the native simulator and judges it from the
@@ -208,8 +214,9 @@ No device settings, current book, current firmware identity, or current selector
 ## Resume checklist
 
 Done in the simulator: the selector-to-render path, the persistence failure path, the per-book scope of
-the override, and the language-specific layout are covered by `scripts/check_book_language.sh` and by the
-host suites.
+the override, and the language-specific layout are covered by `scripts/check_book_language.sh`. On the
+host, `test/epub_pipeline/BookLanguageTest.cpp` covers the language-specific layout and the
+interleaved-build case.
 
 Still open, all of it on the device:
 
