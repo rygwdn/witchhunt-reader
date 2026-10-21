@@ -7611,6 +7611,8 @@ bool EpubReaderActivity::drawCurrentPageToBuffer(const std::string& filePath, Gf
   p.viewportWidth = viewportWidth;
   p.viewportHeight = viewportHeight;
   p.hyphenationEnabled = effectiveHyphenation;
+  // The card's value, not the reader's live one: the sleep page is built by a separate path that
+  // only has the card to work from, so a language the card could not take is not in it.
   snprintf(p.languageOverride, sizeof(p.languageOverride), "%s", currentBook.languageOverride.c_str());
   p.fontSizeNormalization = effectiveFontSizeNormalization;
   p.enforceMinimumFontSize = effectiveEnforceMinimumFontSize;
@@ -7714,12 +7716,25 @@ void EpubReaderActivity::openReaderMenu() {
         applyOrientation(menu.orientation);
         applyTextDarkness(menu.textDarkness);
         toggleAutoPageTurn(menu.pageTurnOption);
-        if (menu.languageOverride != bookLanguageOverride &&
-            RECENT_BOOKS.setLanguageOverride(epub->getPath(), menu.languageOverride)) {
-          RenderLock lock(*this);
-          bookLanguageOverride = menu.languageOverride;
-          resetBackgroundBuild();
-          resetSectionKeepingPosition();
+        if (menu.languageOverride != bookLanguageOverride) {
+          // The change goes live first. It used to wait for the save to succeed, so a card that
+          // could not be written left the reader showing the old language and the reader saw
+          // nothing happen at all -- the same silence as a language that does not reach the
+          // layout. The other per-book overrides have always worked this way: the value applies
+          // and the write is a separate step.
+          const bool saved = RECENT_BOOKS.setLanguageOverride(epub->getPath(), menu.languageOverride);
+          {
+            RenderLock lock(*this);
+            bookLanguageOverride = menu.languageOverride;
+            resetBackgroundBuild();
+            resetSectionKeepingPosition();
+          }
+          if (!saved) {
+            // The sleep page and the next start read the saved book, not this reader's live
+            // value, so an unsaved language does not reach them. Say so, once, in the log.
+            LOG_ERR("ERS", "Could not save the book language override for %s; it lasts until the reader restarts",
+                    epub->getPath().c_str());
+          }
         }
         applyBookReaderOverrides(
             menu.embeddedStyleOverride, menu.imageRenderingOverride, menu.fontFamilyOverride, menu.sdFontFamilyOverride,

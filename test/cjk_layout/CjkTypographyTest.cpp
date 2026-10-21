@@ -127,8 +127,8 @@ TEST(CjkPunctuationWidths, JapaneseLetsAFullStopEndingALineStayFull) {
 TEST(CjkPunctuationWidths, APageBottomRetryKeepsTheMarksWidths) {
   // The retry re-lays a hyphenated line with its words whole: it merges tokens back and measures again, so the
   // line-edge widths must stay in step with the tokens. The last line's 」 is half-width before 。 as without a retry.
-  Hyphenator::setPreferredLanguage("ko");
   ParsedText text(false, /*hyphenationEnabled=*/true, aligned(CssTextAlign::Justify));
+  text.setTypography(TypographyProfile::forLanguage("ko"));
   for (const char* word : {"가나", "다라마바사아", "자」。차"}) text.addWord(word, EpdFontFamily::REGULAR);
   GfxRenderer renderer;
   std::vector<Line> lines;

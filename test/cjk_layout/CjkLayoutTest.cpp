@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "Epub/ParsedText.h"
+#include "Epub/TypographyProfile.h"
 #include "Epub/blocks/TextBlock.h"
 #include "Epub/hyphenation/Hyphenator.h"
 #include "GfxRenderer.h"
@@ -229,8 +230,8 @@ BlockStyle justified() {
 
 std::vector<Line> layoutWords(const std::vector<const char*>& words, const bool hyphenation, const uint16_t width,
                               const BlockStyle& style = justified()) {
-  Hyphenator::setPreferredLanguage("ko");
   ParsedText text(false, hyphenation, style);
+  text.setTypography(TypographyProfile::forLanguage("ko"));
   for (const char* word : words) text.addWord(word, EpdFontFamily::REGULAR);
   return layout(text, width);
 }
@@ -302,8 +303,8 @@ TEST(KoreanLayout, HangulGluedAcrossInlineStyleIsUnbreakable) {
 // Ours: a Hangul split is a hyphenated line end, so at a page bottom the parser's retry re-lays the
 // line with the word whole, as it does for a Latin hyphenation.
 TEST(KoreanLayout, PageBottomRetryKeepsTheHangulWordWhole) {
-  Hyphenator::setPreferredLanguage("ko");
   ParsedText text(false, /*hyphenationEnabled=*/true, justified());
+  text.setTypography(TypographyProfile::forLanguage("ko"));
   for (const char* word : {"가나", "다라마바사아", "자"}) text.addWord(word, EpdFontFamily::REGULAR);
   GfxRenderer renderer;
   std::vector<std::vector<std::string>> lines;

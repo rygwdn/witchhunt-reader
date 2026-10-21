@@ -1344,7 +1344,10 @@ bool ParsedText::hyphenateWordAtIndex(const size_t wordIndex, const int availabl
   // tie. From crosspoint-reader PR #3700 ("fix: justify Korean text by word spaces only", Sung-jin
   // Brian Hong).
   std::vector<Hyphenator::BreakInfo> breakInfos = CjkLineBreak::hangulLineEndBreaks(word);
-  const std::vector<Hyphenator::BreakInfo> hyphenatorBreaks = Hyphenator::breakOffsets(word, allowFallbackBreaks);
+  // The patterns are this book's: the typography profile the build was given, not a global that
+  // another build (the next chapter, the one after) can change under this one's feet.
+  const std::vector<Hyphenator::BreakInfo> hyphenatorBreaks =
+      Hyphenator::breakOffsets(word, allowFallbackBreaks, typography_.hyphenator);
   breakInfos.insert(breakInfos.end(), hyphenatorBreaks.begin(), hyphenatorBreaks.end());
   if (breakInfos.empty()) {
     return false;

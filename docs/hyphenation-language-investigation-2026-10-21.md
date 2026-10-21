@@ -2,9 +2,15 @@
 
 ## Status
 
-Paused at the user's request. **The cause of the reported device behavior is not established.** No firmware source changes or fixes were made during this review/investigation. The outstanding background layout investigation was cancelled.
+The two defects this review found are fixed and verified in the native simulator (see
+[What changed](#what-changed) and [How it is verified](#how-it-is-verified)). **The reported device
+behavior is still not confirmed on the device**: no device was reachable during the review, so the
+evidence below is host and simulator evidence.
 
-User observation: hyphenation is already On, but changing Book language in the reader selector has no apparent effect on hyphenation. Treat that observation as unresolved, not disproved by the host or simulator results below.
+User observation: hyphenation is already On, but changing Book language in the reader selector has no
+apparent effect on hyphenation. The simulator now shows the language reaching the layout, so the
+observation points at the device path (the card write, or a build that is not the one on screen) rather
+than at the selector.
 
 ## Scope reviewed
 
@@ -79,6 +85,56 @@ Temporary evidence, not durable repository assets:
 
 These files can disappear with temporary-directory cleanup.
 
+## What changed
+
+Two defects, both confirmed by reproduction in the native simulator before the fix and by the
+regression check after it.
+
+### 1. The persistence gate swallowed the change (fixed)
+
+The menu callback applied the live language only when the store had written the card, so a failed
+write silently dropped the change: the reader kept the old language and did not reset the layout.
+The live change is now applied first and the write is attempted after it, the way the other per-book
+layout overrides work. A failed write is reported in the log:
+
+```
+[ERR] [ERS] Could not save the book language override for /books/language.epub; it lasts until the reader restarts
+```
+
+### 2. The hyphenation patterns were a global (fixed)
+
+`Hyphenator` kept one cached hyphenator that `Section::runBuildSetup` set and `ParsedText` read. Two
+interleaved builds (the foreground one and the background one, in different languages) could therefore
+lay out a page with the other build's patterns. The patterns now travel with the book: the section
+build hands its `TypographyProfile` to the text layout, and the global is gone.
+
+```cpp
+// lib/Epub/Epub/ParsedText.cpp
+const std::vector<Hyphenator::BreakInfo> hyphenatorBreaks =
+    Hyphenator::breakOffsets(word, allowFallbackBreaks, typography_.hyphenator);
+```
+
+## How it is verified
+
+`scripts/check_book_language.sh` drives the whole path in the native simulator and judges it from the
+reader's own reports, from the pixels it draws and from the card it writes:
+
+```sh
+pio run -e simulator
+scripts/check_book_language.sh /tmp/language-check
+```
+
+It proves that the language selector reaches the reader (`STATE lang=`), that the language reaches the
+layout (the English and the German pages of the same book differ in 39193 pixels), that the
+hyphenation switch reaches the layout (with the language held still, the page changes when the switch
+is turned off), that the card keeps the choice for that book alone (a second book keeps its own), and
+that a card which cannot be written does not swallow the change.
+
+The English page of the fixture shows no hyphen and the German one does: the English patterns break
+"representation" first after "rep", which does not fit in the space left on the line, while the German
+patterns break it after "re", which does. The pages differ by exactly those breaks, which is why the
+check compares pictures and not text.
+
 ## Concrete code defect found: persistence failure silently prevents live application
 
 At `src/activities/reader/EpubReaderActivity.cpp:7717–7723`, the menu callback gates the entire live language change on a successful store operation:
@@ -105,13 +161,25 @@ The store's short-lived `Hold` releases the loaded list when the last hold ends 
 - A book missing from the recent list.
 - Code-inspection reproduction candidate: books under `/test/` are excluded from `RecentBooksStore::addBook()` by `SerialTestApi::isTestBook()` (`RecentBooksStore.cpp:49–51`). With no corresponding recent-book entry, the language setter returns false.
 
-**Evidence level:** the control-flow defect is confirmed by code inspection. Neither a failed-write scenario nor the `/test/` scenario was executed during this investigation. There is no evidence yet that either condition applies to the user's book/device. Do not present this defect as the established root cause.
+**Evidence level:** the control-flow defect is confirmed by code inspection, and the failed-write scenario
+is now executed in the native simulator: with the card file read-only, the change used to be dropped
+(`lang` stayed empty) and now goes live with the failure reported in the log. There is still no
+evidence that either condition applies to the user's book/device, so this remains a defect that was
+fixed, not the established root cause of the device report.
 
-### Possible correction, not implemented
+### Correction (implemented)
 
 Separate live application from persistence, consistent with the other per-book layout overrides, and handle a failed save explicitly. Preserve position and invalidate background/current layout when the live language changes.
 
 Before implementing, account for the sleep-page path: it currently reads the language override from the recent-book store (`EpubReaderActivity.cpp:7614`), not the live reader member. Allowing an unsaved live override would make those sources diverge. Decide and verify the intended behavior rather than changing only the conditional and assuming the cutover is complete.
+
+**Done:** the live change is applied first and the write is attempted after it, the position is kept and
+the layout is invalidated. The change then lasts until the reader restarts, and the log says so.
+
+**Known limit:** the sleep page is built by a separate static path (`SleepActivity` calls
+`EpubReaderActivity::drawCurrentPageToBuffer()`), which has only the card to work from. A language the
+card could not take is therefore not in the sleep page, even though the reader shows it. The same
+holds for the page after a restart.
 
 ## Selector/result paths inspected without finding a drop
 
@@ -139,8 +207,13 @@ No device settings, current book, current firmware identity, or current selector
 
 ## Resume checklist
 
+Done in the simulator: the selector-to-render path, the persistence failure path, the per-book scope of
+the override, and the language-specific layout are covered by `scripts/check_book_language.sh` and by the
+host suites.
+
+Still open, all of it on the device:
+
 1. Establish the current book, language choices before/after, and whether the selected language remains visible after leaving and reopening the menu. A language already equivalent to metadata can legitimately produce the same layout.
 2. Obtain current device logs covering selector exit and the next render/build, plus `recent.json` and firmware/build identity, through an available authorized device connection or user-supplied files.
-3. Determine whether the persistence gate rejects the change, whether a new language-specific section cache is built/adopted, and whether the displayed page belongs to that variant.
-4. If persistence succeeds, finish tracing resumable/background builds and the global Hyphenator state across setup/parse interleaving; this remains an investigation target, not a finding.
-5. Reproduce the actual failure before choosing a fix. Add a focused behavioral regression for the demonstrated failure, then verify the selector-to-render path and persistence/reopen behavior. Hardware repaint and position retention still need device evidence.
+3. Determine whether the persistence gate rejects the change on the device, whether a new language-specific section cache is built/adopted, and whether the displayed page belongs to that variant.
+4. Hardware repaint and position retention still need device evidence: the simulator proves what the reader decides, not what the panel shows.

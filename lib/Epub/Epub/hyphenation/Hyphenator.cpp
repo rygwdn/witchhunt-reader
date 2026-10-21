@@ -18,8 +18,6 @@ static constexpr Iso639Mapping kIso639Mappings[] = {{"eng", "en"}, {"fra", "fr"}
                                                     {"ger", "de"}, {"rus", "ru"}, {"spa", "es"}, {"ita", "it"},
                                                     {"ukr", "uk"}, {"swe", "sv"}, {"pol", "pl"}, {"por", "pt"}};
 
-const LanguageHyphenator* Hyphenator::cachedHyphenator_ = nullptr;
-
 namespace {
 
 const LanguageHyphenator* hyphenatorForLanguage(const std::string& langTag) {
@@ -164,7 +162,8 @@ void sortAndDedupeBreakInfos(std::vector<Hyphenator::BreakInfo>& infos) {
 
 }  // namespace
 
-std::vector<Hyphenator::BreakInfo> Hyphenator::breakOffsets(const std::string& word, const bool includeFallback) {
+std::vector<Hyphenator::BreakInfo> Hyphenator::breakOffsets(const std::string& word, const bool includeFallback,
+                                                           const LanguageHyphenator* hyphenator) {
   if (word.empty()) {
     return {};
   }
@@ -172,7 +171,6 @@ std::vector<Hyphenator::BreakInfo> Hyphenator::breakOffsets(const std::string& w
   // Convert to codepoints and normalize word boundaries.
   auto cps = collectCodepoints(word);
   trimSurroundingPunctuationAndFootnote(cps);
-  const auto* hyphenator = cachedHyphenator_;
 
   // Detect apostrophe-like separators early; used by both branches below.
   bool hasApostropheLikeSeparator = false;
@@ -258,7 +256,5 @@ std::vector<Hyphenator::BreakInfo> Hyphenator::breakOffsets(const std::string& w
 
   return breaks;
 }
-
-void Hyphenator::setPreferredLanguage(const std::string& lang) { cachedHyphenator_ = hyphenatorForLanguage(lang); }
 
 const LanguageHyphenator* Hyphenator::forLanguage(const std::string& lang) { return hyphenatorForLanguage(lang); }

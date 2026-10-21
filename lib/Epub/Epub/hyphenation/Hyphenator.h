@@ -15,7 +15,11 @@ class Hyphenator {
                                   //         (explicit '-' or eligible apostrophe contraction boundary).
   };
 
-  // Returns byte offsets where the word may be hyphenated.
+  // Returns byte offsets where the word may be hyphenated, using the given patterns.
+  //
+  // The patterns are the caller's: the book's TypographyProfile holds them, and every build
+  // passes its own. A null hyphenator means the language has no patterns: only the explicit
+  // hyphens and the fallback split remain.
   //
   // Break sources (in priority order):
   //   1. Explicit hyphens already present in the word (e.g. '-' or soft-hyphen U+00AD).
@@ -33,16 +37,10 @@ class Hyphenator {
   //   4. Fallback every-N-chars splitting (only when includeFallback is true AND no
   //      pattern breaks were found). Used as a last resort to prevent a single oversized
   //      word from overflowing the page width.
-  static std::vector<BreakInfo> breakOffsets(const std::string& word, bool includeFallback);
+  static std::vector<BreakInfo> breakOffsets(const std::string& word, bool includeFallback,
+                                             const LanguageHyphenator* hyphenator);
 
-  // Provide a publication-level language hint (e.g. "en", "en-US", "ru") used to select hyphenation rules.
-  static void setPreferredLanguage(const std::string& lang);
-
-  // The patterns for a language tag ("en", "en-US", "eng"), null when the language has none. The book's
-  // TypographyProfile holds this, and the section build installs it with setLanguageHyphenator().
+  // The patterns for a language tag ("en", "en-US", "eng"), null when the language has none. The
+  // book's TypographyProfile holds this.
   static const LanguageHyphenator* forLanguage(const std::string& lang);
-  static void setLanguageHyphenator(const LanguageHyphenator* hyphenator) { cachedHyphenator_ = hyphenator; }
-
- private:
-  static const LanguageHyphenator* cachedHyphenator_;
 };

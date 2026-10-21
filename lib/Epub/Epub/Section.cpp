@@ -1251,7 +1251,6 @@ Section::BuildPhaseResult Section::runBuildSetup(BuildState& st) {
   // the CJK grid.
   const TypographyProfile typography =
       TypographyProfile::forLanguage(p.languageOverride[0] != '\0' ? p.languageOverride : epub->getLanguage());
-  Hyphenator::setLanguageHyphenator(typography.hyphenator);
   st.visitor->setTypography(typography);
 
   // Inline footnote previews are NOT wired up here: the note text this spine needs may not be

@@ -138,15 +138,13 @@ TEST(HangulLineEndBreaks, NeverBeforeClosingPunctuationButAtDigitsAndBrackets) {
 // Hyphenator::breakOffsets offers fallback breaks inside a word that has no pattern breaks. Next to
 // a CJK character such a break draws no hyphen: CJK scripts are not hyphenated.
 TEST(CjkHyphenator, FallbackBreaksNextToCjkDrawNoHyphen) {
-  Hyphenator::setPreferredLanguage("ja");
-  const auto breaks = Hyphenator::breakOffsets("漢字仮名交", /*includeFallback=*/true);
+  const auto breaks = Hyphenator::breakOffsets("漢字仮名交", /*includeFallback=*/true, Hyphenator::forLanguage("ja"));
   ASSERT_FALSE(breaks.empty());
   for (const auto& b : breaks) EXPECT_FALSE(b.requiresInsertedHyphen) << "offset " << b.byteOffset;
 }
 
 TEST(CjkHyphenator, LatinFallbackBreaksStillDrawAHyphen) {
-  Hyphenator::setPreferredLanguage("ja");
-  const auto breaks = Hyphenator::breakOffsets("abcdefgh", /*includeFallback=*/true);
+  const auto breaks = Hyphenator::breakOffsets("abcdefgh", /*includeFallback=*/true, Hyphenator::forLanguage("ja"));
   ASSERT_FALSE(breaks.empty());
   for (const auto& b : breaks) EXPECT_TRUE(b.requiresInsertedHyphen) << "offset " << b.byteOffset;
 }
