@@ -2,6 +2,10 @@
 
 User-facing changes only. Full commit history is in git log.
 
+## Unreleased
+
+- Fix cached CSS rules inheriting a font size from a previously decoded rule. Heading sizes now follow the stylesheet independently of cache lookup order.
+
 ## 2.40 — 2026-10-13
 
 Everything since 2.37. Your books have one Library screen, with tabs for Recent, New and Authors and a view of their covers, and an SD-card font offers the sizes it was made in. KOReader sync lands on the exact page, the lists move with one set of buttons, and fonts and firmware updates download from GitHub again. The web interface has a new design and many new pages, and lives on the SD card: the first time you open it after updating, it installs itself (see the [Web Interface Guide](docs/webserver.md)). Every language is now translated in full.

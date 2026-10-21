@@ -1730,6 +1730,9 @@ bool CssParser::readCssStylePayload(FsFile& file, CssStyle& style) {
   std::array<uint8_t, CSS_FIXED_STYLE_BYTES> payload;
   if (file.read(payload.data(), payload.size()) != static_cast<int>(payload.size())) return false;
   size_t at = 0;
+  // Disk lookups reuse their destination across rules. An absent property must
+  // not inherit a value or defined bit from the previously decoded rule.
+  style = CssStyle{};
   const auto get = [&payload, &at](void* out, const size_t n) {
     if (at + n > payload.size()) return false;  // a field past CSS_FIXED_STYLE_BYTES: see its static_assert
     memcpy(out, payload.data() + at, n);
