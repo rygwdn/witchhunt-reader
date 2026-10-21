@@ -14,6 +14,16 @@ Run a single suite directly:
 Google Test is fetched via CMake FetchContent on first configure; the pinned
 version lives in test/CMakeLists.txt.
 
+macOS hosts use Apple Clang; GNU-only instrumentation flags and glibc allocator
+fallbacks are excluded. Initialize the SDK before configuring a fresh checkout:
+
+  git submodule update --init freeink-sdk
+
+The TrueType rasterizer target disables AddressSanitizer on macOS. The page
+serialization corruption guard can be exercised independently:
+
+  build/test/epub_pipeline/EpubPipelineTest --gtest_filter='PageSerializeGuardTest.*'
+
 KOReader sync (lib/KOReaderSync) is esp_http_client-based and cannot be built
 by the host CMake toolchain. It is covered instead by a pair of offline scripts.
 No credentials, no accounts, no third-party server is ever contacted.
