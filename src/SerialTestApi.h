@@ -51,9 +51,10 @@ PowerRequest takePowerRequest();
 // heap) for CMD:STATE and the EVT: lines to report later.
 // A popup with this text was just drawn (BaseTheme/LyraTheme drawPopup).
 void notePopup(const char* text);
-// A list or menu was drawn with row `index` highlighted, showing `label` (null when unknown). The
-// last list drawn on the current screen wins.
-void noteSelection(int index, const char* label);
+// A list or menu was drawn with row `index` highlighted, showing `label` (null when unknown) and,
+// for a row that shows one, its `value` (null when unknown). The last list drawn on the current
+// screen wins.
+void noteSelection(int index, const char* label, const char* value = nullptr);
 // A section build finished: `spineIndex` is 0-based, as the reader holds it.
 void noteBuildDone(int spineIndex, int pageCount);
 // A font family's download ended, installed (`ok`) or not: the Font Manager's or the web page's.
@@ -71,7 +72,7 @@ inline void begin(GfxRenderer&) {}
 inline void service() {}
 inline PowerRequest takePowerRequest() { return PowerRequest::None; }
 inline void notePopup(const char*) {}
-inline void noteSelection(int, const char*) {}
+inline void noteSelection(int, const char*, const char* = nullptr) {}
 inline void noteBuildDone(int, int) {}
 inline void noteFontInstalled(const char*, bool) {}
 inline bool takeDecodeRefusal() { return false; }

@@ -117,6 +117,7 @@ constexpr size_t kProbeText = 64;  // a popup message or a row label; longer one
 
 struct TextProbe {
   char text[kProbeText] = {};
+  char value[kProbeText] = {};  // the selected row's value, when the screen draws one
   int index = -1;
   uint32_t activity = 0;
   uint32_t renderPass = 0;
@@ -127,22 +128,27 @@ struct TextProbe {
 TextProbe popupProbe;
 TextProbe selectionProbe;
 
-void noteText(TextProbe& probe, const int index, const char* text) {
+// Copies one line into a probe slot: control characters (a popup's line breaks) become spaces, and
+// a text cut short does not end in half a UTF-8 character.
+void copyProbeText(char* dst, const char* text) {
+  size_t i = 0;
+  for (; text && text[i] != '\0' && i + 1 < kProbeText; ++i) {
+    dst[i] = static_cast<unsigned char>(text[i]) < 0x20 ? ' ' : text[i];
+  }
+  if (text && text[i] != '\0') {
+    while (i > 0 && (static_cast<unsigned char>(dst[i - 1]) & 0xC0) == 0x80) --i;
+    if (i > 0 && static_cast<unsigned char>(dst[i - 1]) >= 0xC0) --i;
+  }
+  dst[i] = '\0';
+}
+
+void noteText(TextProbe& probe, const int index, const char* text, const char* value = nullptr) {
   const uint32_t activity = activityManager.activityChangeCount();
   const uint32_t renderPass = activityManager.renderPassCount();
   const uint32_t now = millis();
   portENTER_CRITICAL(&probeMux);
-  size_t i = 0;
-  // One line on the wire: control characters (a popup's line breaks) become spaces.
-  for (; text && text[i] != '\0' && i + 1 < kProbeText; ++i) {
-    probe.text[i] = static_cast<unsigned char>(text[i]) < 0x20 ? ' ' : text[i];
-  }
-  // A text cut short must not end in half a UTF-8 character: drop its continuation bytes and lead.
-  if (text && text[i] != '\0') {
-    while (i > 0 && (static_cast<unsigned char>(probe.text[i - 1]) & 0xC0) == 0x80) --i;
-    if (i > 0 && static_cast<unsigned char>(probe.text[i - 1]) >= 0xC0) --i;
-  }
-  probe.text[i] = '\0';
+  copyProbeText(probe.text, text);
+  copyProbeText(probe.value, value);
   probe.index = index;
   probe.activity = activity;
   probe.renderPass = renderPass;
@@ -477,6 +483,8 @@ void cmdState(std::string_view /*arg*/) {
   if (selection.set && selection.activity == activity && state.find(" sel=") == std::string::npos) {
     appendField(state, "sel", static_cast<long>(selection.index));
     if (selection.text[0] != '\0') appendField(state, "label", selection.text);
+    // The value the highlighted row shows, when it shows one: a setting's current choice.
+    if (selection.value[0] != '\0') appendField(state, "value", selection.value);
   }
   const TextProbe popup = readProbe(popupProbe);
   if (popup.set && popup.activity == activity && popup.renderPass == activityManager.renderPassCount()) {
@@ -1101,7 +1109,9 @@ void service() {
 
 void notePopup(const char* text) { noteText(popupProbe, -1, text); }
 
-void noteSelection(const int index, const char* label) { noteText(selectionProbe, index, label); }
+void noteSelection(const int index, const char* label, const char* value) {
+  noteText(selectionProbe, index, label, value);
+}
 
 void noteBuildDone(const int spineIndex, const int pageCount) {
   portENTER_CRITICAL(&probeMux);
@@ -1130,12 +1140,21 @@ bool takeDecodeRefusal() { return takeRefusal(decodeRefusals); }
 bool takeReloadRefusal() { return takeRefusal(reloadRefusals); }
 
 bool isTestBook(const std::string_view path) {
+#if defined(SIMULATOR)
+  // The simulator's card is a disposable fixture directory: there is no reader whose recent list
+  // or statistics a test book could push out, and keeping a book out of the recent list also
+  // keeps it out of the per-book settings -- a test that changes a book's language, font or
+  // hyphenation needs the book to be an ordinary one. So here every book is ordinary.
+  (void)path;
+  return false;
+#else
   // In any case: FAT folds it, and the file browser opens the folder a test names /test/ as /TEST/.
   constexpr std::string_view kFolder = "/test/";
   return path.size() >= kFolder.size() &&
          std::equal(kFolder.begin(), kFolder.end(), path.begin(), [](const char want, const char got) {
            return want == std::tolower(static_cast<unsigned char>(got));
          });
+#endif
 }
 
 PowerRequest takePowerRequest() {

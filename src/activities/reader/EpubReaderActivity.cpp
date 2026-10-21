@@ -6792,6 +6792,12 @@ void EpubReaderActivity::appendDebugState(std::string& out) const {
   appendField(out, "font", family);
   appendField(out, "font_pt",
               static_cast<long>(bookFontSizeOverride >= 0 ? bookFontSizeOverride : SETTINGS.fontPointSize));
+  // The language the book is laid out in: the per-book override when one is set, else the book's
+  // own metadata. Empty when neither says. The hyphenation that goes with it.
+  const std::string& metadataLanguage = epub ? epub->getLanguage() : std::string();
+  const std::string& language = bookLanguageOverride.empty() ? metadataLanguage : bookLanguageOverride;
+  appendField(out, "lang", language);
+  appendField(out, "hyphen", static_cast<long>(getEffectiveHyphenation() ? 1 : 0));
   if (!epub || !section) return;
   // What the status bar shows, whichever parts of it the settings turn on: the chapter title, the
   // page within the whole TOC chapter (which can span several spine items, so it can differ from

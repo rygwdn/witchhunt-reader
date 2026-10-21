@@ -19,10 +19,20 @@ them all and exits non-zero if any failed).
   expect:<regex>:<sec>  read until an output line matches (re.search), fail otherwise
   select:<regex>[:<n>]  press Down, waiting for each, until STATE's label matches (re.fullmatch); at most n
                         presses (default 40). The label is checked first, so a row already selected takes none.
+  tab:<name>[:<n>]      switch tabs (a long Down) until STATE's tab matches: <name> is the tab's label
+                        (re.fullmatch) or, when it is a number, its tab_slot; at most n switches
+                        (default 8). The tab is checked first, so the current one takes none.
+  set:<label>=<value>  make the row whose label matches <label> (re.fullmatch) show the value
+                        <value> (re.fullmatch): confirm the row, and when it opens a selector,
+                        pick the option that matches and confirm it. A row that already shows the
+                        value takes no press.
+  diff:<a.png>:<b.png>[:<n>]
+                        the two screenshots must differ in at least n pixels (default 1): "the screen
+                        changed" as an assertion
 
 A --script file holds one step per line; blank lines and lines starting with # are skipped.
-Every line the device prints goes to --log with a timestamp. Needs pyserial (for --port only) and
-Pillow for shot:.
+Every line the device prints goes to --log with a timestamp. Needs pyserial for --port alone: the
+native flow and the screenshots need nothing but the standard library.
 
 The port is opened with the default DTR/RTS lines, which does not reset an ESP32-C3 (unlike
 tools/serial_transfer.py, which deasserts them), and closed with RTS dropped before DTR, which does
@@ -42,10 +52,12 @@ import argparse
 import os
 import re
 import select
+import struct
 import subprocess
 import sys
 import threading
 import time
+import zlib
 
 # First words of every reply the firmware sends to a command (see docs/serial-test-api.md).
 REPLY = re.compile(
@@ -65,6 +77,94 @@ def is_text(data):
     """
     text_controls = (9, 10, 13, 27)
     return not any(byte < 32 and byte not in text_controls for byte in data)
+
+
+# --- PNG, with nothing but the standard library ----------------------------------------------
+# The device sends a 1-bit frame: rows from top to bottom, 8 pixels per byte, the leftmost pixel
+# in the highest bit, a set bit is white. These helpers turn that into a PNG the host can open,
+# and read one back, so the whole flow needs no third-party package.
+
+def frame_rows(width, height, data, rotate):
+    """The frame as rows of 0 (black) and 255 (white) bytes, turned as asked.
+
+    `rotate` is a PIL-style angle: -90 is a quarter turn clockwise, 90 counter-clockwise, 180
+    upside down, 0 keeps the panel's own frame.
+    """
+    stride = (width + 7) // 8
+    rows = []
+    for y in range(height):
+        row = bytearray(width)
+        base = y * stride
+        for x in range(width):
+            row[x] = 255 if (data[base + (x >> 3)] >> (7 - (x & 7))) & 1 else 0
+        rows.append(row)
+    if rotate == 0:
+        return rows, width, height
+    if rotate == 180:
+        return [row[::-1] for row in rows[::-1]], width, height
+    turned = [bytearray(height) for _ in range(width)]
+    if rotate == -90:  # a quarter turn clockwise
+        for y, source in enumerate(rows):
+            for x, pixel in enumerate(source):
+                turned[x][height - 1 - y] = pixel
+    elif rotate == 90:  # a quarter turn counter-clockwise
+        for y, source in enumerate(rows):
+            for x, pixel in enumerate(source):
+                turned[width - 1 - x][y] = pixel
+    else:
+        raise ValueError(f"unsupported rotation {rotate}")
+    return turned, height, width
+
+
+def png_chunk(tag, body):
+    return (struct.pack(">I", len(body)) + tag + body +
+            struct.pack(">I", zlib.crc32(tag + body) & 0xFFFFFFFF))
+
+
+def write_png(path, width, height, rows):
+    """Write 8-bit greyscale rows as a PNG."""
+    raw = b"".join(b"\x00" + bytes(row) for row in rows)
+    header = struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0)
+    png = (b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", header) +
+           png_chunk(b"IDAT", zlib.compress(raw, 9)) + png_chunk(b"IEND", b""))
+    with open(path, "wb") as handle:
+        handle.write(png)
+
+
+def read_png_gray(path):
+    """The rows of a PNG written by write_png(): (width, height, rows).
+
+    Only the shape this module writes is read: 8-bit greyscale, no interlacing, every row
+    stored unfiltered. Another tool's PNG raises ValueError.
+    """
+    with open(path, "rb") as handle:
+        data = handle.read()
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError("not a PNG")
+    pos = 8
+    width = height = 0
+    compressed = b""
+    while pos + 8 <= len(data):
+        length = struct.unpack(">I", data[pos:pos + 4])[0]
+        tag = data[pos + 4:pos + 8]
+        body = data[pos + 8:pos + 8 + length]
+        pos += 12 + length
+        if tag == b"IHDR":
+            width, height, depth, colour, _, _, interlace = struct.unpack(">IIBBBBB", body)
+            if depth != 8 or colour != 0 or interlace:
+                raise ValueError("not an 8-bit greyscale PNG")
+        elif tag == b"IDAT":
+            compressed += body
+        elif tag == b"IEND":
+            break
+    raw = zlib.decompress(compressed)
+    rows = []
+    for y in range(height):
+        start = y * (width + 1)
+        if raw[start] != 0:
+            raise ValueError("unsupported PNG row filter")
+        rows.append(bytearray(raw[start + 1:start + 1 + width]))
+    return width, height, rows
 
 
 def native_path(path):
@@ -512,12 +612,8 @@ class Device:
                 data = self.read_exact(int(size), time.time() + 30)
                 if len(data) != int(size):
                     return f"short frame: {len(data)} of {size} bytes"
-                from PIL import Image  # only shot: needs Pillow
-
-                image = Image.frombytes("1", (int(w), int(h)), data)
-                if rotate:
-                    image = image.rotate(rotate, expand=True)
-                image.save(path)
+                rows, width, height = frame_rows(int(w), int(h), data, rotate)
+                write_png(path, width, height, rows)
                 end = self.read_line(time.time() + 5)
                 return None if end == "SCREENSHOT_END" else f"no SCREENSHOT_END (got {end!r})"
             if line.startswith("SCREENSHOT_ERROR"):
@@ -529,6 +625,61 @@ def idle_timeout(arg):
     """Seconds to wait for the reply to CMD:IDLE<arg>: the device's own timeout and some slack."""
     first = arg.split(":")[0] if arg else ""
     return (int(first) if first.isdigit() else 10000) / 1000 + 5
+
+
+def read_state(device):
+    """The device's STATE fields, as a dict (empty when it does not answer)."""
+    reply = device.command("STATE")
+    if not reply or not reply.startswith("STATE:"):
+        return {}
+    return split_fields(reply[len("STATE:"):])
+
+
+def set_setting(device, label, wanted, state):
+    """Make the row whose label matches `label` show the value `wanted`.
+
+    A setting row is one of two kinds: one that opens a selector (a list of choices to pick
+    from) and one that cycles through its choices in place. Confirming the row does the right
+    thing for either, but a script cannot know which it is, so this looks: confirm the row and,
+    when a selector came up, pick the wanted option in it and confirm that. The label is matched
+    as a regular expression against the whole string; the value is matched the same way but
+    without regard to case, because the device writes "ON" where a script would say "on".
+    """
+    row = read_state(device)
+    for press in range(41):
+        if re.fullmatch(label, row.get("label", "")):
+            break
+        if press == 40:
+            print(f"ROW NOT FOUND: {label} (last label {row.get('label')!r})")
+            return False
+        device.command("BTN:DOWN")
+        device.command("IDLE:5000", timeout=idle_timeout("5000"))
+        row = read_state(device)
+    for attempt in range(5):
+        if re.fullmatch(wanted, row.get("value", ""), re.IGNORECASE):
+            print(f"{row.get('label')!r} is {row.get('value')!r}")
+            state.update(row)
+            return True
+        before = row.get("activity", "")
+        device.command("BTN:CONFIRM")
+        device.command("IDLE:5000", timeout=idle_timeout("5000"))
+        after = read_state(device)
+        if after.get("activity", "") != before:
+            # A selector came up: pick the wanted option in it.
+            for press in range(60):
+                if re.fullmatch(wanted, after.get("label", ""), re.IGNORECASE):
+                    break
+                if press == 59:
+                    print(f"OPTION NOT FOUND: {wanted} (last option {after.get('label')!r})")
+                    return False
+                device.command("BTN:DOWN")
+                device.command("IDLE:5000", timeout=idle_timeout("5000"))
+                after = read_state(device)
+            device.command("BTN:CONFIRM")
+            device.command("IDLE:5000", timeout=idle_timeout("5000"))
+        row = read_state(device)
+    print(f"VALUE NOT REACHED: {label} -> {wanted} (now {row.get('value')!r})")
+    return False
 
 
 def run(device, steps, rotate, keep_going=False):
@@ -586,6 +737,52 @@ def run(device, steps, rotate, keep_going=False):
                 device.command("IDLE:5000", timeout=idle_timeout("5000"))
             if not ok:
                 print(f"NOT SELECTED: {pattern} (last label {fields.get('label')!r})")
+        elif kind == "set":
+            label, _, wanted = rest.partition("=")
+            ok = set_setting(device, label, wanted, state)
+        elif kind == "tab":
+            pattern, _, most = rest.partition(":")
+            presses = int(most) if most.isdigit() else 8
+            ok = False
+            fields = {}
+            for press in range(presses + 1):
+                reply = device.command("STATE")
+                fields = split_fields(reply[len("STATE:"):]) if reply and reply.startswith("STATE:") else {}
+                if pattern.isdigit():
+                    matched = fields.get("tab_slot") == pattern
+                else:
+                    matched = re.fullmatch(pattern, fields.get("tab", "")) is not None
+                if matched:
+                    state = fields
+                    ok = True
+                    print(f"on tab {fields.get('tab')!r} (slot {fields.get('tab_slot')}) after {press} switches")
+                    break
+                if press == presses:
+                    break
+                # A long Down steps to the next tab; the list answers on the next pass.
+                device.command("BTN:DOWN:LONG")
+                device.command("IDLE:5000", timeout=idle_timeout("5000"))
+            if not ok:
+                print(f"TAB NOT REACHED: {pattern} (last tab {fields.get('tab')!r})")
+        elif kind == "diff":
+            first, _, tail = rest.partition(":")
+            second, _, most = tail.partition(":")
+            minimum = int(most) if most.isdigit() else 1
+            try:
+                left_width, left_height, left_rows = read_png_gray(native_path(first))
+                right_width, right_height, right_rows = read_png_gray(native_path(second))
+            except (OSError, ValueError) as error:
+                print(f"diff {first} {second}: cannot read the images: {error}")
+                ok = False
+            else:
+                if (left_width, left_height) != (right_width, right_height):
+                    print(f"diff {first} {second}: different sizes "
+                          f"{left_width}x{left_height} vs {right_width}x{right_height}")
+                    ok = False
+                else:
+                    changed = sum(sum(1 for x, y in zip(a, b) if x != y) for a, b in zip(left_rows, right_rows))
+                    ok = changed >= minimum
+                    print(f"diff {first} {second}: {changed} pixels differ (need at least {minimum})")
         elif kind == "wait":
             end = time.time() + float(rest)
             while device.read_line(end) is not None:

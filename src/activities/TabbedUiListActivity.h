@@ -44,6 +44,13 @@ class TabbedUiListActivity : public UiListActivity {
 
   // --- provided to the subclass ---------------------------------------------------------
   [[nodiscard]] int selectedTab() const { return selectedTabSlot; }
+
+#if SERIAL_TEST_API
+  // CMD:STATE: " tab=<label> tab_slot=<n>", so a host script knows which tab the screen shows
+  // without reading a screenshot. The label is the tab's own, in the device's UI language; the
+  // slot is its position among the visible tabs, which does not change with the language.
+  void appendDebugState(std::string& out) const override;
+#endif
   // True while the bar, rather than a row, holds focus.
   [[nodiscard]] bool tabsFocused() { return activeNav().selected < 0; }
   // Move to a tab with focus on its bar (a tap on a tab, Confirm on the bar). Out-of-range slots

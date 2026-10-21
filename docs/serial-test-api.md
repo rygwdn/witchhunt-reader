@@ -199,9 +199,13 @@ Reply: one line, `STATE:` followed by `key=value` pairs.
 | `activity` | always | the screen on top (`Home`, `EpubReader`, `Settings`, `DictionaryWordSelect`, ...) |
 | `stack` | always | the screens below it, bottom first, comma-separated (`""` when none) |
 | `sel`, `label` | menus and lists | the highlighted row (0-based) and its text; `sel=-1` when a tab bar has the focus |
+| `value` | menus and lists | the value the highlighted row shows (the state of a setting, the text of a choice), when the row shows one |
+| `tab`, `tab_slot` | screens with tabs | the selected tab's label and its slot; the label is the interface language's, the slot is not |
 | `popup`, `popup_ms` | when a popup is up | its text, and how long ago it was drawn |
 | `book`, `spine`, `page` | EPUB reader | the file, spine item `n/count`, page within that spine item `n/count`; both count from 1 |
 | `font`, `font_pt` | EPUB reader | the font family and point size the book is set in |
+| `lang` | EPUB reader | the language the book is laid out in: the per-book override when one is set, else the book's own metadata; empty when neither says |
+| `hyphen` | EPUB reader | `1` when the book is hyphenated, `0` when it is not (the per-book switch, else the global one) |
 | `chapter`, `chapter_page`, `percent` | EPUB reader | what the status bar shows: the TOC chapter title, the page within the whole chapter, which can span several spine items (`~` when the total is still an estimate), the book percentage |
 | `heap`, `maxblock` | always | free heap and the largest free block, in bytes |
 
@@ -255,6 +259,7 @@ image.save("screen.png")
 ```
 
 `tools/devctl.py` (option `--rotate`) and `scripts/debugging_monitor.py` decode the frame for you.
+`tools/devctl.py` writes the PNG with the standard library alone, so a native run needs no extra package.
 Replies, event lines and the frame are all written by the main loop, so they never cut into each
 other.
 
@@ -637,7 +642,8 @@ The child inherits the environment; `--cwd` changes its working directory and re
 settings and progress are still saved. Stdout is the binary-safe protocol stream;
 stderr is drained separately into the timestamped log and is available to `expect:`.
 Never merge stderr into stdout while decoding screenshots. Pyserial is needed only
-for USB mode; Pillow remains required for `shot:`.
+for USB mode; the native flow needs nothing else: `shot:` and `diff:` write and read
+the PNGs with the standard library alone.
 
 Keep the simulator and firmware logging changes together: the native simulator builds
 the firmware's `lib/Logging/Logging.cpp`, whose `SIMULATOR` path writes logs to stderr.
@@ -681,7 +687,10 @@ screenshot -> page.png
 Steps: `cmd:<TEXT>` (send `CMD:<TEXT>`, fail on an error reply; `GET:*` and `FS:LS:` print every line of
 their reply), `state` and `check:<key>=<regex>` (test a field of the last `STATE`), `idle[:<ms>[:SCREEN]]`,
 `shot:<file.png>`, `wait:<seconds>`, `expect:<regex>:<seconds>` (wait for a log line), `select:<regex>[:<n>]` (press
-Down, waiting for each press to land, until the selected row's label matches; at most n presses, 40 by default).
+Down, waiting for each press to land, until the selected row's label matches; at most n presses, 40 by default),
+`set:<regex>=<value>` (press the selected row until it shows that value; works for a setting row and for a
+choice row), `tab:<name>[:<slot>]` (switch to the tab with that label), `diff:<a.png>:<b.png>[:<pixels>]` (fail
+unless the two pictures differ in at least that many pixels).
 `--script FILE` reads one step per line (`#` comments), `--keep-going` runs all steps and reports every failure,
 `--rotate` sets the screenshot rotation. Paths may be given as Git Bash writes them (`/c/tmp/page.png`); output is
 UTF-8 whatever the console, and the port is closed without resetting the device even when a step fails. A script
@@ -704,6 +713,37 @@ it redraws, and it lands further down than asked. Opening the Font Manager from 
 ```sh
 python3 tools/devctl.py cmd:ACT:SETTINGS:READER idle:20000 "select:Font Manager" cmd:BTN:CONFIRM idle:60000:SCREEN
 ```
+
+`tab:` and `set:` walk a screen with tabs and change a setting on it: `tab:` picks the tab by its label
+(the label is the interface language's, so quote the pattern), and `set:` presses the row until it shows the
+wanted value. Both work on the reader's own menu, so a test can change a per-book setting and read back what
+the reader does with it:
+
+```sh
+python3 tools/devctl.py --exec .pio/build/simulator/program \
+  cmd:BTN:CONFIRM idle:10000 tab:Settings "set:^Book language$=German" \
+  cmd:BTN:BACK idle:5000 cmd:BTN:BACK idle:30000 state check:lang=de
+```
+
+`diff:` compares two pictures taken in the same run and fails when they are the same, which is how a test
+shows that a setting reached the layout: the same book laid out in two languages draws two different pages.
+
+## A repeatable check: the reader's per-book language
+
+`scripts/check_book_language.sh` drives the whole per-book language and hyphenation path in the native
+simulator and judges it from the reader's own reports, from the pixels it draws and from the card it writes:
+
+```sh
+pio run -e simulator
+scripts/check_book_language.sh /tmp/language-check
+```
+
+It writes the fixture book (`scripts/make_language_fixture.py`), then proves that the language selector reaches
+the reader (`STATE lang=`), that the language reaches the layout (the English and the German pages differ), that
+the hyphenation switch reaches the layout (with the language held still, the page changes when the switch is
+turned off), that the card keeps the choice for that book alone, and that a card which cannot be written does
+not swallow the change: the reader shows the new language anyway and the log says the change will not survive
+a restart. The work directory keeps the screenshots and the log.
 
 For a long session, capture the full log separately as well (one reader of the port at a time:
 `devctl.py --log` already records every line it sees).

@@ -4,6 +4,7 @@
 
 #include "CrossPointSettings.h"
 #include "MappedInputManager.h"
+#include "util/SerialCommandGrammar.h"
 
 namespace fui = freeink::ui;
 
@@ -144,3 +145,14 @@ ListRowTap::Result TabbedUiListActivity::selectListRow(const int index) {
   if (index >= 0 && index < listCount() && !isRowSelectable(index)) return ListRowTap::Result::Rejected;
   return ListRowTap::apply(index, listCount(), activeNav().selected);
 }
+
+#if SERIAL_TEST_API
+void TabbedUiListActivity::appendDebugState(std::string& out) const {
+  using SerialCommandGrammar::appendField;
+  if (tabCount() > 0) {
+    appendField(out, "tab", tabLabel(selectedTabSlot));
+    // The slot among the visible tabs: the label is the interface language's, the slot is not.
+    appendField(out, "tab_slot", static_cast<long>(selectedTabSlot));
+  }
+}
+#endif  // SERIAL_TEST_API

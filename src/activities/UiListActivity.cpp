@@ -167,18 +167,23 @@ void UiListActivity::addList(UiScreen& screen, fui::ListProps& props, const bool
 void UiListActivity::noteListSelection(const fui::ListProps& props) {
   const int index = props.selectedIndex;
   const char* label = nullptr;
+  const char* value = nullptr;
   fui::ListItem row;  // the provider formats into buffers it owns; the probe copies the label at once
   if (index >= 0 && index < props.count) {
     if (props.rowProvider) {
       props.rowProvider(props.rowProviderCtx, static_cast<uint16_t>(index), row);
       label = row.label;
+      value = row.value;
     } else if (props.items) {
       const int inWindow = index - props.itemsWindowFirst;
       const int windowRows = props.itemsWindowCount ? props.itemsWindowCount : props.count - props.itemsWindowFirst;
-      if (inWindow >= 0 && inWindow < windowRows) label = props.items[inWindow].label;
+      if (inWindow >= 0 && inWindow < windowRows) {
+        label = props.items[inWindow].label;
+        value = props.items[inWindow].value;
+      }
     }
   }
-  SerialTestApi::noteSelection(index, label);
+  SerialTestApi::noteSelection(index, label, value);
 }
 #endif  // SERIAL_TEST_API
 
