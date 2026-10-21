@@ -200,6 +200,8 @@ class Section {
     bool bionicReadingEnabled = false;
     bool inlineFootnotePreviews = false;
     uint8_t imageRendering = 0;
+    // Empty follows EPUB metadata. Inline storage keeps copied/resumable params allocation-free.
+    char languageOverride[16] = {};
     // Rung IDs and ratios are hashed independently of the body font ID.
     // Default (empty) preserves the selected face's scale-only fallback.
     FontSizeLadder fontSizeLadder;

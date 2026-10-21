@@ -110,6 +110,14 @@ Legend: ✅ supported · ⚠️ partial / basic · ❌ not supported.
 | TOC / chapter selection | ✅ | ✅ |
 | Browser breadcrumb footer + continuous page-jump | ❌ dropped | ✅ |
 
+While reading an EPUB, open the reader menu → **Settings → Book language** to choose the
+book's language when its metadata is missing or unrecognized. **Default** uses the EPUB's
+language (or its `.opf` sidecar); an explicit choice is saved for this book and controls
+hyphenation patterns and language-specific typography, not the interface language. Changing
+it rebuilds the layout while retaining the reading position. The selector includes English,
+French, German, Russian, Spanish, Italian, Swedish, Polish, Ukrainian, Portuguese, Simplified
+and Traditional Chinese, Japanese, and Korean.
+
 ## System, Settings, Network & Input
 
 | Feature | Witch Reader | CrossPoint |

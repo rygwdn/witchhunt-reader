@@ -76,6 +76,7 @@ void RecentBooksStore::addBook(const std::string& path, const std::string& title
     newBook.fontSizeNormalizationOverride = it->fontSizeNormalizationOverride;
     newBook.guideDotsOverride = it->guideDotsOverride;
     newBook.inlineFootnotePreviewsOverride = it->inlineFootnotePreviewsOverride;
+    newBook.languageOverride = it->languageOverride;
     recentBooks.erase(it);
   }
 
@@ -326,6 +327,16 @@ bool RecentBooksStore::setReaderOverrides(const std::string& path, const int8_t 
   it->guideDotsOverride = guideDotsOverride;
   it->inlineFootnotePreviewsOverride = inlineFootnotePreviewsOverride;
   it->enforceMinimumFontSizeOverride = enforceMinimumFontSizeOverride;
+  return saveToFile();
+}
+
+bool RecentBooksStore::setLanguageOverride(const std::string& path, const std::string& language) {
+  const Hold hold;
+  auto it =
+      std::find_if(recentBooks.begin(), recentBooks.end(), [&](const RecentBook& book) { return book.path == path; });
+  if (it == recentBooks.end()) return false;
+  if (it->languageOverride == language) return true;
+  it->languageOverride = language;
   return saveToFile();
 }
 

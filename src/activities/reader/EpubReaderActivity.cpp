@@ -835,6 +835,7 @@ void EpubReaderActivity::onEnter() {
   bookGuideDotsOverride = currentBook.guideDotsOverride;
   bookInlineFootnotePreviewsOverride = currentBook.inlineFootnotePreviewsOverride;
   bookEnforceMinimumFontSizeOverride = currentBook.enforceMinimumFontSizeOverride;
+  bookLanguageOverride = currentBook.languageOverride;
   logReaderMemSnapshot("onEnter_after_recent_books");
 
   // Take the scaled-glyph cache now, before any page is laid out. It is never released, and
@@ -1461,6 +1462,7 @@ Section::BuildParams EpubReaderActivity::makeSectionBuildParams() const {
   p.viewportWidth = layout.viewportWidth;
   p.viewportHeight = layout.viewportHeight;
   p.hyphenationEnabled = getEffectiveHyphenation();
+  snprintf(p.languageOverride, sizeof(p.languageOverride), "%s", bookLanguageOverride.c_str());
   p.fontSizeNormalization = getEffectiveFontSizeNormalization();
   p.enforceMinimumFontSize = getEffectiveEnforceMinimumFontSize();
   p.embeddedStyle = lastRenderStats.embeddedStyle;
@@ -7609,6 +7611,7 @@ bool EpubReaderActivity::drawCurrentPageToBuffer(const std::string& filePath, Gf
   p.viewportWidth = viewportWidth;
   p.viewportHeight = viewportHeight;
   p.hyphenationEnabled = effectiveHyphenation;
+  snprintf(p.languageOverride, sizeof(p.languageOverride), "%s", currentBook.languageOverride.c_str());
   p.fontSizeNormalization = effectiveFontSizeNormalization;
   p.enforceMinimumFontSize = effectiveEnforceMinimumFontSize;
   p.embeddedStyle = effectiveEmbeddedStyle;
@@ -7705,12 +7708,19 @@ void EpubReaderActivity::openReaderMenu() {
           bookSdFontFamilyOverride, bookFontSizeOverride, SETTINGS.textDarkness, getEffectiveBionicReading(),
           bookGuideDotsOverride, bookParagraphAlignmentOverride, bookTextAntiAliasingOverride, bookHyphenationOverride,
           bookFontSizeNormalizationOverride, bookInlineFootnotePreviewsOverride, bookEnforceMinimumFontSizeOverride,
-          !bookmarkStore.isEmpty(), isCurrentPageStarred, hasPrintedPages),
+          !bookmarkStore.isEmpty(), isCurrentPageStarred, hasPrintedPages, bookLanguageOverride, epub->getLanguage()),
       [this](const ActivityResult& result) {
         const auto& menu = std::get<MenuResult>(result.data);
         applyOrientation(menu.orientation);
         applyTextDarkness(menu.textDarkness);
         toggleAutoPageTurn(menu.pageTurnOption);
+        if (menu.languageOverride != bookLanguageOverride &&
+            RECENT_BOOKS.setLanguageOverride(epub->getPath(), menu.languageOverride)) {
+          RenderLock lock(*this);
+          bookLanguageOverride = menu.languageOverride;
+          resetBackgroundBuild();
+          resetSectionKeepingPosition();
+        }
         applyBookReaderOverrides(
             menu.embeddedStyleOverride, menu.imageRenderingOverride, menu.fontFamilyOverride, menu.sdFontFamilyOverride,
             menu.fontSizeOverride, static_cast<bool>(menu.bionicReadingOverride), menu.paragraphAlignmentOverride,

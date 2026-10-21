@@ -38,6 +38,8 @@ struct RecentBook {
   int8_t inlineFootnotePreviewsOverride = -1;
   // -1 = use global default, otherwise explicit per-book override (0 = off, 1 = on).
   int8_t enforceMinimumFontSizeOverride = -1;
+  // Empty = use EPUB/sidecar metadata; otherwise a per-book BCP 47 language tag.
+  std::string languageOverride;
 
   bool operator==(const RecentBook& other) const { return path == other.path; }
 };
@@ -138,6 +140,7 @@ class RecentBooksStore {
   bool loadFromFile();
   RecentBook getDataFromBook(std::string path) const;
   RecentBook getBookByPath(const std::string& path) const;
+  bool setLanguageOverride(const std::string& path, const std::string& language);
   bool setReaderOverrides(const std::string& path, int8_t embeddedStyleOverride, int8_t imageRenderingOverride);
   bool setReaderOverrides(const std::string& path, int8_t embeddedStyleOverride, int8_t imageRenderingOverride,
                           int8_t fontFamilyOverride, int8_t fontSizeOverride);
@@ -153,7 +156,7 @@ class RecentBooksStore {
   bool setReaderOverrides(const std::string& path, int8_t embeddedStyleOverride, int8_t imageRenderingOverride,
                           int8_t fontFamilyOverride, const std::string& sdFontFamilyOverride, int8_t fontSizeOverride,
                           bool bionicReadingOverride, int8_t paragraphAlignmentOverride);
-  // Master overload — covers every per-book override. The narrower overloads above
+  // Master layout/toggle overload; language has its own setter. The narrower overloads above
   // all funnel through here, preserving any fields they don't take as arguments.
   bool setReaderOverrides(const std::string& path, int8_t embeddedStyleOverride, int8_t imageRenderingOverride,
                           int8_t fontFamilyOverride, const std::string& sdFontFamilyOverride, int8_t fontSizeOverride,

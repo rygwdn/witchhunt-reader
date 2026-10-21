@@ -61,7 +61,8 @@ class EpubReaderMenuActivity final : public TabbedUiListActivity {
                                   const int8_t initialFontSizeNormalizationOverride,
                                   const int8_t initialInlineFootnotePreviewsOverride,
                                   const int8_t initialEnforceMinimumFontSizeOverride, const bool hasStarredPages,
-                                  const bool isCurrentPageStarred, const bool hasPrintedPages);
+                                  const bool isCurrentPageStarred, const bool hasPrintedPages,
+                                  const std::string& initialLanguageOverride, const std::string& detectedLanguage);
 
   void onExit() override;
 
@@ -139,6 +140,8 @@ class EpubReaderMenuActivity final : public TabbedUiListActivity {
   int8_t pendingFontSizeNormalizationOverride = -1;
   int8_t pendingInlineFootnotePreviewsOverride = -1;
   int8_t pendingEnforceMinimumFontSizeOverride = -1;
+  std::string pendingLanguageOverride;
+  std::string detectedLanguage;
 
   static constexpr const char* pageTurnLabels[] = {"", "1", "3", "6", "12"};
 

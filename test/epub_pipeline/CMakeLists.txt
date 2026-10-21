@@ -111,6 +111,7 @@ add_executable(EpubPipelineTest
   PageListSinkTest.cpp
   PageSerializeGuardTest.cpp
   MetadataSidecarTest.cpp
+  BookLanguageTest.cpp
   SidecarFilesTest.cpp
   SectionAbortTest.cpp
   SpinePageIndexTest.cpp

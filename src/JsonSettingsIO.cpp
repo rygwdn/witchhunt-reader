@@ -720,6 +720,9 @@ bool JsonSettingsIO::saveRecentBooks(const RecentBooksStore& store, const char* 
     obj["paragraphAlignmentOverride"] = book.paragraphAlignmentOverride;
     obj["textAntiAliasingOverride"] = book.textAntiAliasingOverride;
     obj["hyphenationOverride"] = book.hyphenationOverride;
+    if (!book.languageOverride.empty()) {
+      obj["languageOverride"] = book.languageOverride;
+    }
     obj["fontSizeNormalizationOverride"] = book.fontSizeNormalizationOverride;
     obj["enforceMinimumFontSizeOverride"] = book.enforceMinimumFontSizeOverride;
     obj["guideDotsOverride"] = book.guideDotsOverride;
@@ -799,6 +802,7 @@ RecentBooksLoad JsonSettingsIO::loadRecentBooks(RecentBooksStore& store, const c
         clampInt8(obj["paragraphAlignmentOverride"] | -1, -1, CrossPointSettings::PARAGRAPH_ALIGNMENT_COUNT - 1, -1);
     book.textAntiAliasingOverride = clampInt8(obj["textAntiAliasingOverride"] | -1, -1, 1, -1);
     book.hyphenationOverride = clampInt8(obj["hyphenationOverride"] | -1, -1, 1, -1);
+    book.languageOverride = obj["languageOverride"] | std::string("");
     book.fontSizeNormalizationOverride = clampInt8(obj["fontSizeNormalizationOverride"] | -1, -1, 1, -1);
     book.enforceMinimumFontSizeOverride = clampInt8(obj["enforceMinimumFontSizeOverride"] | -1, -1, 1, -1);
     book.guideDotsOverride = clampInt8(obj["guideDotsOverride"] | -1, -1, 1, -1);

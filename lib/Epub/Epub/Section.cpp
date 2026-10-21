@@ -346,8 +346,9 @@ uint32_t fnv1a(const uint8_t* data, size_t length) {
 }  // namespace
 
 uint32_t Section::calculatePropertyHash(const BuildParams& p) {
-  uint8_t buffer[160];
-  static_assert(sizeof(buffer) >= 21 + sizeof(uint32_t) + BlockFontFamilies::kMaxFamilies * 3 * sizeof(int32_t) +
+  uint8_t buffer[176];
+  static_assert(sizeof(buffer) >= sizeof(p.languageOverride) + 21 + sizeof(uint32_t) +
+                                     BlockFontFamilies::kMaxFamilies * 3 * sizeof(int32_t) +
                                      sizeof(int8_t) + FontSizeLadder::kMaxRungs * (sizeof(int32_t) + sizeof(uint16_t)),
                 "the settings, every family, and every ladder rung fit");
   size_t offset = 0;
@@ -387,6 +388,10 @@ uint32_t Section::calculatePropertyHash(const BuildParams& p) {
   for (int i = 0; i < p.fontSizeLadder.count; ++i) {
     append(&p.fontSizeLadder.rungs[i].fontId, sizeof(p.fontSizeLadder.rungs[i].fontId));
     append(&p.fontSizeLadder.rungs[i].sizePct, sizeof(p.fontSizeLadder.rungs[i].sizePct));
+  }
+  // Keep the metadata-based variant's key unchanged; explicit languages get separate layouts.
+  if (p.languageOverride[0] != '\0') {
+    append(p.languageOverride, sizeof(p.languageOverride));
   }
 
   return fnv1a(buffer, offset);
@@ -1244,7 +1249,8 @@ Section::BuildPhaseResult Section::runBuildSetup(BuildState& st) {
   if (st.arena && st.arena != st.ownedArena.get()) st.visitor->setBuildArena(st.arena);
   // The book's language decides its typography (TypographyProfile.h): hyphenation patterns, CJK punctuation widths,
   // the CJK grid.
-  const TypographyProfile typography = TypographyProfile::forLanguage(epub->getLanguage());
+  const TypographyProfile typography =
+      TypographyProfile::forLanguage(p.languageOverride[0] != '\0' ? p.languageOverride : epub->getLanguage());
   Hyphenator::setLanguageHyphenator(typography.hyphenator);
   st.visitor->setTypography(typography);
 

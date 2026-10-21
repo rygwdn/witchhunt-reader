@@ -729,6 +729,7 @@ class EpubReaderActivity final : public Activity {
   int8_t bookGuideDotsOverride = -1;
   int8_t bookInlineFootnotePreviewsOverride = -1;
   int8_t bookEnforceMinimumFontSizeOverride = -1;
+  std::string bookLanguageOverride;
 
   // Bookmarks (starred pages)
   BookmarkStore bookmarkStore;

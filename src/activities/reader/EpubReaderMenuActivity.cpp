@@ -20,6 +20,28 @@ namespace fui = freeink::ui;
 #endif
 
 namespace {
+struct BookLanguageOption {
+  const char* tag;
+  StrId label;
+};
+constexpr BookLanguageOption bookLanguages[] = {
+    {"", StrId::STR_DEFAULT_VALUE},
+    {"en", StrId::STR_LANGUAGE_ENGLISH},
+    {"fr", StrId::STR_LANGUAGE_FRENCH},
+    {"de", StrId::STR_LANGUAGE_GERMAN},
+    {"ru", StrId::STR_LANGUAGE_RUSSIAN},
+    {"es", StrId::STR_LANGUAGE_SPANISH},
+    {"it", StrId::STR_LANGUAGE_ITALIAN},
+    {"sv", StrId::STR_LANGUAGE_SWEDISH},
+    {"pl", StrId::STR_LANGUAGE_POLISH},
+    {"uk", StrId::STR_LANGUAGE_UKRAINIAN},
+    {"pt", StrId::STR_LANGUAGE_PORTUGUESE},
+    {"zh-Hans", StrId::STR_LANGUAGE_CHINESE_SIMPLIFIED},
+    {"zh-Hant", StrId::STR_LANGUAGE_CHINESE_TRADITIONAL},
+    {"ja", StrId::STR_LANGUAGE_JAPANESE},
+    {"ko", StrId::STR_LANGUAGE_KOREAN},
+};
+
 // Three-state cycle helper for overrides represented as int8_t with -1 = default.
 // Mirrors the helpers in QuickOverridesActivity.cpp; kept duplicated rather
 // than extracted so each activity stays self-contained for 16 lines of code.
@@ -119,7 +141,7 @@ EpubReaderMenuActivity::EpubReaderMenuActivity(
     const int8_t initialTextAntiAliasingOverride, const int8_t initialHyphenationOverride,
     const int8_t initialFontSizeNormalizationOverride, const int8_t initialInlineFootnotePreviewsOverride,
     const int8_t initialEnforceMinimumFontSizeOverride, const bool hasStarredPages, const bool isCurrentPageStarred,
-    const bool hasPrintedPages)
+    const bool hasPrintedPages, const std::string& initialLanguageOverride, const std::string& detectedLanguage)
     : TabbedUiListActivity("EpubReaderMenu", renderer, mappedInput),
       currentPageStarred(isCurrentPageStarred),
       pendingOrientation(currentOrientation),
@@ -137,6 +159,8 @@ EpubReaderMenuActivity::EpubReaderMenuActivity(
       pendingFontSizeNormalizationOverride(initialFontSizeNormalizationOverride),
       pendingInlineFootnotePreviewsOverride(initialInlineFootnotePreviewsOverride),
       pendingEnforceMinimumFontSizeOverride(initialEnforceMinimumFontSizeOverride),
+      pendingLanguageOverride(initialLanguageOverride),
+      detectedLanguage(detectedLanguage),
       title(title),
       currentPage(currentPage),
       totalPages(totalPages),
@@ -150,7 +174,7 @@ void EpubReaderMenuActivity::buildMenuItems(bool hasFootnotes, bool hasStarredPa
   auto& syncItems = tabMenuItems[static_cast<size_t>(MenuTab::Sync)];
   auto& toolsItems = tabMenuItems[static_cast<size_t>(MenuTab::Tools)];
   navigationItems.reserve(8);
-  settingsItems.reserve(13);
+  settingsItems.reserve(16);
   syncItems.reserve(4);
   toolsItems.reserve(8);
 
@@ -179,6 +203,29 @@ void EpubReaderMenuActivity::buildMenuItems(bool hasFootnotes, bool hasStarredPa
   navigationItems.push_back(SettingInfo::Action(StrId::STR_DICTIONARY, SettingAction::None));
 
   auto* self = this;
+  // Keep language alongside the other per-book layout settings, including when metadata is missing.
+  {
+    std::vector<StrId> values;
+    values.reserve(std::size(bookLanguages));
+    for (const auto& language : bookLanguages) values.push_back(language.label);
+    settingsItems.push_back(
+        SettingInfo::DynamicEnumCtx(
+            StrId::STR_BOOK_LANGUAGE, values, self,
+            [](const void* ctx) -> uint8_t {
+              const auto& language = static_cast<const EpubReaderMenuActivity*>(ctx)->pendingLanguageOverride;
+              for (uint8_t i = 0; i < std::size(bookLanguages); ++i) {
+                if (language == bookLanguages[i].tag) return i;
+              }
+              return 0;
+            },
+            [](void* ctx, uint8_t value) {
+              if (value < std::size(bookLanguages)) {
+                static_cast<EpubReaderMenuActivity*>(ctx)->pendingLanguageOverride = bookLanguages[value].tag;
+              }
+            })
+            .withSelectorActivity());
+  }
+
   // Orientation: straightforward 0-3 cycle
   settingsItems.push_back(SettingInfo::DynamicEnumCtx(
       StrId::STR_ORIENTATION,
@@ -511,6 +558,7 @@ void EpubReaderMenuActivity::finishWithAction(MenuAction action) {
   payload.guideDotsOverride = pendingGuideDotsOverride;
   payload.inlineFootnotePreviewsOverride = pendingInlineFootnotePreviewsOverride;
   payload.enforceMinimumFontSizeOverride = pendingEnforceMinimumFontSizeOverride;
+  payload.languageOverride = pendingLanguageOverride;
   setResult(std::move(payload));
   finish();
 }
@@ -559,6 +607,7 @@ void EpubReaderMenuActivity::onBackPressed() {
   payload.fontSizeNormalizationOverride = pendingFontSizeNormalizationOverride;
   payload.guideDotsOverride = pendingGuideDotsOverride;
   payload.inlineFootnotePreviewsOverride = pendingInlineFootnotePreviewsOverride;
+  payload.languageOverride = pendingLanguageOverride;
   result.data = std::move(payload);
   setResult(std::move(result));
   finish();
@@ -590,6 +639,10 @@ std::string EpubReaderMenuActivity::getItemValueString(int index) const {
   }
 
   if (item.type == SettingType::ENUM) {
+    if (item.nameId == StrId::STR_BOOK_LANGUAGE && pendingLanguageOverride.empty()) {
+      return std::string(tr(STR_DEFAULT_VALUE)) + " (" +
+             (detectedLanguage.empty() ? tr(STR_LANGUAGE_NOT_DETECTED) : detectedLanguage) + ")";
+    }
     if (item.nameId == StrId::STR_EMBEDDED_STYLE && pendingEmbeddedStyleOverride < 0) {
       const auto defaultEffective = (SETTINGS.embeddedStyle != 0) ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
       return std::string(tr(STR_DEFAULT_VALUE)) + " (" + defaultEffective + ")";

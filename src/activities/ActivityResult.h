@@ -49,6 +49,8 @@ struct MenuResult {
   uint8_t browserView = 0;
   // Also appended for positional-initialiser safety.
   int8_t enforceMinimumFontSizeOverride = -1;
+  // Empty restores the language from the book's metadata.
+  std::string languageOverride;
 };
 
 struct ChapterResult {
