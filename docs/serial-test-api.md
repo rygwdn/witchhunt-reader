@@ -619,6 +619,39 @@ The commands act on a real device with a real user's books and settings:
 - **`SLEEP` and `BTN:POWER:LONG` end the session** until someone presses a button.
 - **A dictionary index build** (the first lookup in a dictionary) holds the device for seconds.
 
+## Native simulator over stdio
+
+The local `crosspoint-simulator` native backend can run these commands without USB or SDL.
+Build the firmware's `simulator` environment with `SERIAL_TEST_API=1`, then use
+`tools/devctl.py --exec .pio/build/simulator/program` instead of `--port`.
+The same steps, `--script`, assertions and screenshot decoder apply:
+
+```sh
+CROSSPOINT_SIM_SD=/tmp/reader-sd python3 tools/devctl.py \
+  --exec .pio/build/simulator/program --log /tmp/reader-run.log \
+  cmd:ACT:HOME idle:30000 state check:activity=Home shot:/tmp/home.png
+```
+
+The child inherits the environment; `--cwd` changes its working directory and repeatable
+`--exec-arg` supplies executable arguments. Use a disposable SD fixture directory:
+settings and progress are still saved. Stdout is the binary-safe protocol stream;
+stderr is drained separately into the timestamped log and is available to `expect:`.
+Never merge stderr into stdout while decoding screenshots. Pyserial is needed only
+for USB mode; Pillow remains required for `shot:`.
+
+Keep the simulator and firmware logging changes together: the native simulator builds
+the firmware's `lib/Logging/Logging.cpp`, whose `SIMULATOR` path writes logs to stderr.
+The local `platformio.local.ini` wires the simulator checkout with a symlink dependency;
+that machine-specific file is intentionally not committed. Portable native environment
+examples live in the simulator's `sample-platformio-macos.ini` and
+`sample-platformio-linux-wsl.ini`.
+
+Send commands sequentially and wait for `IDLE` before closing stdin. EOF disconnects
+the controller; it is not a completion barrier for asynchronous UI work. Native sleep
+ends the process successfully; reboot re-execs the same executable with its streams
+preserved. Native runs exercise firmware behavior, not physical panel timing,
+ghosting, peripheral fidelity or ESP32 memory limits.
+
 ## A worked session with tools/devctl.py
 
 `tools/devctl.py` sends commands, waits for their replies, decodes screenshots, and logs everything

@@ -8,6 +8,7 @@
 #include <freertos/task.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <string>
 
@@ -176,7 +177,14 @@ void logPrintf(const char* level, const char* origin, const char* format, ...) {
   // serialWireMuted is honoured on every path: it is how the serial-transfer
   // activity keeps log noise out of a binary protocol stream.
   if (!serialWireMuted && levelRank(level) <= wireLevel) {
-#if FREEINK_LOG_TRANSPORT == FREEINK_LOG_TRANSPORT_ROM_PRINTF
+#if defined(SIMULATOR) && !defined(__EMSCRIPTEN__)
+    // Native simulator: stdout carries the CLI protocol (CMD replies and the
+    // binary screenshot payload), so a log line must not go there. The mute
+    // and the runtime wire level still gate this block, exactly as they gate
+    // the hardware transports below.
+    std::fputs(buf, stderr);
+    std::fflush(stderr);
+#elif FREEINK_LOG_TRANSPORT == FREEINK_LOG_TRANSPORT_ROM_PRINTF
     // IDF/ROM console: the most robust path when the USB bridge is external
     // (Sticky) and Arduino's Serial object is not the thing being monitored.
     esp_rom_printf("%s", buf);

@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Drive the reader over USB serial with the serial test API (docs/serial-test-api.md).
+"""Drive the reader with the serial test API (docs/serial-test-api.md), over USB serial or a
+native build run as a child process.
 
     tools/devctl.py [--port P] [--log FILE] [--rotate DEG] STEP...
     tools/devctl.py [--port P] --script steps.txt
+    tools/devctl.py --exec PATH [--exec-arg A]... [--cwd DIR] [--log FILE] [--rotate DEG] STEP...
 
 Steps run in order; the run stops at the first failed step and exits non-zero (--keep-going runs
 them all and exits non-zero if any failed).
@@ -19,23 +21,31 @@ them all and exits non-zero if any failed).
                         presses (default 40). The label is checked first, so a row already selected takes none.
 
 A --script file holds one step per line; blank lines and lines starting with # are skipped.
-Every line the device prints goes to --log with a timestamp. Needs pyserial, and Pillow for shot:.
+Every line the device prints goes to --log with a timestamp. Needs pyserial (for --port only) and
+Pillow for shot:.
 
 The port is opened with the default DTR/RTS lines, which does not reset an ESP32-C3 (unlike
 tools/serial_transfer.py, which deasserts them), and closed with RTS dropped before DTR, which does
 not either (a plain close on Windows does). The device re-enumerates its USB port across a
 reboot or a sleep; the reader reopens it and carries on.
+
+--exec runs a native build of the firmware as a child process instead of talking to a port. The
+child speaks the same protocol on its stdin/stdout (a command line in, the same reply lines and
+the same binary screenshot frame out) and writes its log to stderr, which is drained on its own
+thread into --log with the same timestamps. The commands, the checks and the screenshots work the
+same way; only the transport differs. The child's stdout is read as raw bytes: the screenshot
+frame is never decoded as text. The child's stdin stays open while the steps run and is closed
+at the end, which is how the child is told to finish. pyserial is needed for --port alone, so a
+native run needs no pyserial.
 """
 import argparse
 import os
 import re
+import select
+import subprocess
 import sys
+import threading
 import time
-
-try:
-    import serial  # pyserial
-except ImportError:
-    sys.exit("pyserial is required: pip install pyserial")
 
 # First words of every reply the firmware sends to a command (see docs/serial-test-api.md).
 REPLY = re.compile(
@@ -45,6 +55,16 @@ REPLY = re.compile(
 # Commands that answer with several lines, and the line that ends them.
 MULTI_LINE = {"GET:*": re.compile(r"^GET_END"), "FS:LS:": re.compile(r"^FS_END")}
 FAILED = re.compile(r"_ERROR|_TIMEOUT|^CMD_ERROR")
+
+
+def is_text(data):
+    """True if the raw bytes look like a text line, and not a piece of the binary frame.
+
+    Bytes over 127 are allowed: the device prints UTF-8 (book titles). Only the control
+    characters a text line does not hold (tab, newline, carriage return, escape) are text.
+    """
+    text_controls = (9, 10, 13, 27)
+    return not any(byte < 32 and byte not in text_controls for byte in data)
 
 
 def native_path(path):
@@ -84,41 +104,80 @@ def split_fields(text):
     return fields
 
 
-class Device:
-    def __init__(self, port, log_path=None):
-        self.port = port
-        self.log = open(log_path, "a", encoding="utf-8", errors="replace") if log_path else None
-        self.t0 = time.time()
-        self.buf = b""
-        self.ser = self._open()
+class LogTail:
+    """The device's log lines, kept so that `expect` can match them.
 
-    def note(self, line):
-        if self.log:
-            self.log.write(f"[{time.time() - self.t0:8.2f}] {line}\n")
-            self.log.flush()
+    In --exec mode the log comes on the child's stderr, which is drained on its own thread: the
+    log never mixes into the protocol stream, so matching a log line cannot touch the binary
+    screenshot frame. A line is matched once, so a later `expect` does not match it again.
+    """
+
+    def __init__(self, limit=5000):
+        self.limit = limit
+        self.lines = []  # (number, text)
+        self.next_number = 0
+        self.matched = set()  # the numbers an `expect` has already matched
+        self.lock = threading.Lock()
+
+    def append(self, line):
+        with self.lock:
+            self.lines.append((self.next_number, line))
+            self.next_number += 1
+            if len(self.lines) > self.limit:
+                for number, _ in self.lines[:len(self.lines) - self.limit]:
+                    self.matched.discard(number)
+                del self.lines[:len(self.lines) - self.limit]
+
+    def mark(self):
+        """The number the next line will get: the lines before it are older than the last
+        command that was sent."""
+        with self.lock:
+            return self.next_number
+
+    def take(self, pattern, since=0):
+        """The oldest line that is not older than `since`, is not matched yet, and matches
+        `pattern`; or None."""
+        with self.lock:
+            for number, text in self.lines:
+                if number < since or number in self.matched:
+                    continue
+                if pattern.search(text):
+                    self.matched.add(number)
+                    return text
+        return None
+
+
+def pyserial():
+    """pyserial, imported only when a port is used."""
+    try:
+        import serial
+    except ImportError:
+        sys.exit("pyserial is required for --port: pip install pyserial")
+    return serial
+
+
+class SerialTransport:
+    """The device's USB serial port."""
+
+    def __init__(self, port):
+        self.port = port
+        self.serial = pyserial()
+        self.ser = self._open()
 
     def _open(self):
         for _ in range(60):
             try:
-                s = serial.Serial(self.port, 115200, timeout=0.2)
+                s = self.serial.Serial(self.port, 115200, timeout=0.2)
                 s.write(b"\r\n")  # C3 USB-CDC output waits until the host has written something
                 return s
-            except (serial.SerialException, OSError):
+            except (self.serial.SerialException, OSError):
                 time.sleep(0.5)
         sys.exit(f"cannot open {self.port}")
 
-    def close(self):
-        # RTS goes low before DTR: a plain close on Windows drops DTR first, and the ESP32-C3's USB serial unit
-        # takes RTS high with DTR low as a reset request (esptool's), so every run restarted the device to Home.
-        if self.ser.is_open:
-            self.ser.rts = False
-            self.ser.dtr = False
-        self.ser.close()
-
-    def _read(self, size):
+    def read(self, size, timeout=0.2):
         try:
             return self.ser.read(size)
-        except (serial.SerialException, OSError):
+        except (self.serial.SerialException, OSError):
             # The port went away (reboot, sleep, re-enumeration): reopen and go on.
             try:
                 self.close()
@@ -128,40 +187,291 @@ class Device:
             self.ser = self._open()
             return b""
 
+    def write(self, data):
+        self.ser.write(data)
+
+    def pending(self):
+        try:
+            return self.ser.in_waiting
+        except Exception:
+            return 0
+
+    def close(self):
+        # RTS goes low before DTR: a plain close on Windows drops DTR first, and the ESP32-C3's USB serial unit
+        # takes RTS high with DTR low as a reset request (esptool's), so every run restarted the device to Home.
+        if self.ser.is_open:
+            self.ser.rts = False
+            self.ser.dtr = False
+        self.ser.close()
+
+    @property
+    def dead(self):
+        """A serial port never ends by itself: the device reboots and comes back."""
+        return False
+
+
+class ExecTransport:
+    """A native build of the firmware, run as a child process.
+
+    Commands go to its stdin, the protocol (reply lines and the binary screenshot frame) comes
+    back on its stdout, and its log comes on its stderr. The stderr is drained on its own
+    thread into the log file, so a chatty log cannot stall the protocol and the log never
+    mixes into the binary frame. The stdout is read as raw bytes and never decoded as text
+    before the frame is read exactly.
+    """
+
+    def __init__(self, path, args=(), cwd=None, on_log=None):
+        self.on_log = on_log
+        try:
+            self.proc = subprocess.Popen([path, *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                         stderr=subprocess.PIPE, cwd=cwd, bufsize=0)
+        except OSError as error:
+            sys.exit(f"cannot run {path}: {error}")
+        self.eof = False
+        self.pump = threading.Thread(target=self._drain_stderr, daemon=True)
+        self.pump.start()
+
+    def _drain_stderr(self):
+        fd = self.proc.stderr.fileno()
+        buf = b""
+        while True:
+            try:
+                data = os.read(fd, 4096)
+            except OSError:
+                break
+            if not data:
+                break
+            buf += data
+            while (nl := buf.find(b"\n")) >= 0:
+                line, buf = buf[:nl], buf[nl + 1:]
+                self._log(line.decode("utf-8", errors="replace").rstrip("\r"))
+        if buf:
+            self._log(buf.decode("utf-8", errors="replace").rstrip("\r"))
+
+    def _log(self, line):
+        if self.on_log:
+            self.on_log(line)
+
+    def read(self, size, timeout=0.2):
+        """Raw bytes from the child's stdout; b"" when nothing came in the timeout or at the end."""
+        if self.eof:
+            return b""
+        fd = self.proc.stdout.fileno()
+        try:
+            ready, _, _ = select.select([fd], [], [], timeout)
+        except (OSError, ValueError):
+            self.eof = True
+            return b""
+        if not ready:
+            return b""
+        try:
+            data = os.read(fd, size)
+        except OSError:
+            self.eof = True
+            return b""
+        if not data:
+            self.eof = True
+        return data
+
+    def write(self, data):
+        try:
+            fd = self.proc.stdin.fileno()
+            while data:
+                written = os.write(fd, data)
+                data = data[written:]
+        except (BrokenPipeError, OSError):
+            self.eof = True
+
+    def pending(self):
+        """Bytes waiting on stdout, without consuming them."""
+        try:
+            import fcntl
+            import struct
+            import termios
+            buf = fcntl.ioctl(self.proc.stdout.fileno(), termios.FIONREAD, b"\0" * 4)
+            return struct.unpack("i", buf)[0]
+        except Exception:
+            pass
+        # No FIONREAD: say there is something there if the pipe is readable, and let the read
+        # take what is there.
+        try:
+            ready, _, _ = select.select([self.proc.stdout.fileno()], [], [], 0)
+            return 65536 if ready else 0
+        except (OSError, ValueError):
+            return 0
+
+    @property
+    def dead(self):
+        """True when no more protocol bytes can arrive: the child is gone, or its stdout is
+        closed and drained. A command that waits for a reply gives up at once instead of
+        sitting out its whole timeout."""
+        return self.eof or self.proc.poll() is not None
+
+    def shutdown(self, timeout=15.0):
+        """Close the child's stdin (its end of file, which is how it is told to finish), wait for
+        it to go, and insist if it does not. Returns the exit code and whether it had to be
+        stopped the hard way."""
+        try:
+            self.proc.stdin.close()
+        except OSError:
+            pass
+        try:
+            code = self.proc.wait(timeout=timeout)
+            forced = False
+        except subprocess.TimeoutExpired:
+            self.proc.terminate()  # the child handles SIGTERM and winds up on its own
+            try:
+                code = self.proc.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                code = self.proc.wait()
+            forced = True
+        # Whatever the child left on stdout before it went: keep it for the log.
+        self.trailing = self._drain_stdout()
+        self.pump.join(timeout=2.0)
+        return code, forced
+
+    def _drain_stdout(self):
+        fd = self.proc.stdout.fileno()
+        out = b""
+        while True:
+            try:
+                ready, _, _ = select.select([fd], [], [], 0.05)
+            except (OSError, ValueError):
+                break
+            if not ready:
+                break
+            try:
+                data = os.read(fd, 65536)
+            except OSError:
+                break
+            if not data:
+                break
+            out += data
+        return out
+
+    def close(self):
+        return self.shutdown()
+
+
+class Device:
+    """The device, over a transport: the USB serial port, or a native build run as a child.
+
+    Commands, replies and the binary screenshot frame are the same either way; only where the
+    bytes come from differs. The device's log (the child's stderr, in --exec mode) is kept
+    apart from the protocol stream, so `expect` can match it without touching the frame.
+    """
+
+    def __init__(self, transport, log_path=None):
+        self.transport = transport
+        self.log = open(log_path, "a", encoding="utf-8", errors="replace") if log_path else None
+        self.log_lock = threading.Lock()
+        self.t0 = time.time()
+        self.buf = b""
+        self.tail = LogTail()
+        self.log_mark = 0  # the log lines older than this are not matched by `expect`
+
+    @classmethod
+    def serial(cls, port, log_path=None):
+        return cls(SerialTransport(port), log_path)
+
+    @classmethod
+    def child(cls, path, args=(), cwd=None, log_path=None):
+        device = cls(None, log_path)
+        device.transport = ExecTransport(path, args, cwd, device.on_log_line)
+        return device
+
+    def note(self, line):
+        with self.log_lock:
+            if self.log:
+                self.log.write(f"[{time.time() - self.t0:8.2f}] {line}\n")
+                self.log.flush()
+
+    def on_log_line(self, line):
+        """A line from the device's log (the child's stderr): into the log file and into the
+        tail that `expect` matches."""
+        self.tail.append(line)
+        self.note(line)
+
+    def close(self):
+        """Close the transport. For a child: close its stdin (its end of file), wait for it to
+        finish, and log whatever it left on stdout."""
+        result = self.transport.close()
+        trailing = getattr(self.transport, "trailing", b"")
+        for raw in trailing.split(b"\n"):
+            if raw and is_text(raw):
+                self.note(raw.decode("utf-8", errors="replace").rstrip("\r"))
+        with self.log_lock:
+            if self.log:
+                self.log.close()
+                self.log = None
+        return result
+
+    def _read(self, size):
+        return self.transport.read(size)
+
     def read_line(self, deadline):
+        """The next protocol line, or None when the deadline passes or the device is gone.
+
+        Only text is decoded. A piece of the binary frame is never taken for a line: it is
+        noted and the read gives up, so a frame that arrives out of band fails loudly instead
+        of being decoded as text.
+        """
         while time.time() < deadline:
             nl = self.buf.find(b"\n")
             if nl >= 0:
-                line, self.buf = self.buf[:nl], self.buf[nl + 1:]
-                text = line.decode("utf-8", errors="replace").rstrip("\r")
+                raw, self.buf = self.buf[:nl], self.buf[nl + 1:]
+                if not is_text(raw):
+                    self.note(f"<binary: {len(raw)} bytes>")
+                    return None
+                text = raw.decode("utf-8", errors="replace").rstrip("\r")
                 self.note(text)
                 return text
-            self.buf += self._read(4096)
+            data = self._read(4096)
+            if not data:
+                if self.transport.dead:
+                    return None  # the child is gone: no reply is coming
+                time.sleep(0.01)
+                continue
+            self.buf += data
         return None
 
     def read_exact(self, size, deadline):
+        """Exactly `size` raw bytes, or fewer if the deadline passes or the device is gone.
+        The bytes are never decoded: this is where the screenshot frame comes from."""
         while len(self.buf) < size and time.time() < deadline:
-            self.buf += self._read(min(65536, size - len(self.buf)))
+            data = self._read(min(65536, size - len(self.buf)))
+            if not data:
+                if self.transport.dead:
+                    break
+                time.sleep(0.01)
+                continue
+            self.buf += data
         data, self.buf = self.buf[:size], self.buf[size:]
         return data
 
     def drain(self):
         """Log and drop the lines already received, so a late reply to an earlier command (one that
         timed out here) cannot pass for the reply to the next. A partial line is kept."""
-        try:
-            waiting = self.ser.in_waiting
-        except (serial.SerialException, OSError):
-            waiting = 0
-        if waiting:
-            self.buf += self._read(waiting)
+        while True:
+            waiting = self.transport.pending()
+            if not waiting:
+                break
+            data = self._read(waiting)
+            if not data:
+                break
+            self.buf += data
         while (nl := self.buf.find(b"\n")) >= 0:
-            line, self.buf = self.buf[:nl], self.buf[nl + 1:]
-            self.note(line.decode("utf-8", errors="replace").rstrip("\r"))
+            raw, self.buf = self.buf[:nl], self.buf[nl + 1:]
+            if is_text(raw):
+                self.note(raw.decode("utf-8", errors="replace").rstrip("\r"))
 
     def send(self, text):
         self.drain()
         self.note(f">>> CMD:{text}")
-        self.ser.write(("CMD:" + text + "\n").encode())
+        # The log lines from now on belong to this command: `expect` after it matches those.
+        self.log_mark = self.tail.mark()
+        self.transport.write(("CMD:" + text + "\n").encode())
 
     def command(self, text, timeout=20, until=None, lines=None):
         """Send a command; return its reply line (the terminator of a several-line reply), or None. With `until`,
@@ -178,6 +488,20 @@ class Device:
             if REPLY.match(line):
                 return line
         return None
+
+    def expect_line(self, pattern, deadline):
+        """Wait for a line matching `pattern`: the device's log (the child's stderr, in --exec
+        mode) or a line on the protocol stream. The log is matched first, so a log line is never
+        mistaken for a reply and the binary frame is left alone."""
+        while True:
+            line = self.tail.take(pattern, self.log_mark)
+            if line is not None:
+                return line
+            if time.time() >= deadline:
+                return None
+            line = self.read_line(min(deadline, time.time() + 0.2))
+            if line is not None and pattern.search(line):
+                return line
 
     def screenshot(self, path, rotate):
         self.send("SCREENSHOT")
@@ -269,11 +593,7 @@ def run(device, steps, rotate, keep_going=False):
         elif kind == "expect":
             pattern, _, seconds = rest.rpartition(":")
             end = time.time() + float(seconds)
-            found = None
-            while (line := device.read_line(end)) is not None:
-                if re.search(pattern, line):
-                    found = line
-                    break
+            found = device.expect_line(re.compile(pattern), end)
             print(f"matched: {found}" if found else f"NOT SEEN: {pattern}")
             ok = found is not None
         else:
@@ -289,7 +609,14 @@ def run(device, steps, rotate, keep_going=False):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--port", default="/dev/ttyACM0")
+    where = ap.add_mutually_exclusive_group()
+    where.add_argument("--port", default="/dev/ttyACM0", help="the device's serial port")
+    where.add_argument("--exec", dest="exec_path", default=None,
+                       help="run this native build of the firmware as a child process and talk to it "
+                            "over its stdin/stdout (its log comes on stderr)")
+    ap.add_argument("--exec-arg", dest="exec_args", action="append", default=[],
+                    help="an argument for the --exec program (repeatable)")
+    ap.add_argument("--cwd", default=None, help="working directory for the --exec program")
     ap.add_argument("--log", default=None, help="append the device's output here, timestamped")
     ap.add_argument("--rotate", type=int, default=-90,
                     help="rotate screenshots by this many degrees (default -90: the X4's 800x480 frame "
@@ -308,13 +635,23 @@ def main():
 
     # Labels, chapter titles and popups may be in any script: a console's code page must not stop the run.
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    device = Device(args.port, native_path(args.log) if args.log else None)
+    log_path = native_path(args.log) if args.log else None
+    if args.exec_path:
+        device = Device.child(args.exec_path, args.exec_args, args.cwd, log_path)
+    else:
+        device = Device.serial(args.port, log_path)
     try:
         ok = run(device, steps, args.rotate, args.keep_going)
     finally:
         # Whatever went wrong, the port closes RTS before DTR: an exception that closed it plainly would reset the
-        # device (see close()).
-        device.close()
+        # device (see close()). A child gets its stdin closed (its end of file, which is how it is told to finish)
+        # and is waited for.
+        result = device.close()
+    if args.exec_path and result:
+        code, forced = result
+        print(f"child exited with code {code}" + (" (it had to be stopped)" if forced else ""))
+        if forced or code != 0:
+            ok = False
     sys.exit(0 if ok else 1)
 
 
