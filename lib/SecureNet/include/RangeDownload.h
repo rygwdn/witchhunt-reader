@@ -12,7 +12,7 @@
 #include <string>
 
 #include "HttpRange.h"
-#include "SecureHttpClient.h"
+#include <SecureHttpClient.h>
 
 namespace crosspoint {
 

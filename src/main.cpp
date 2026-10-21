@@ -30,7 +30,9 @@
 #include <builtinFonts/all.h>
 #include <esp_heap_caps.h>
 #include <esp_ota_ops.h>
+#if defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT
 #include <hal/usb_serial_jtag_ll.h>
+#endif
 
 #include <cstring>
 #include <vector>
