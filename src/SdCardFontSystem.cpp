@@ -404,13 +404,27 @@ void SdCardFontSystem::ensureLoaded(GfxRenderer& renderer, const char* const* wa
   // the font area to itself).
   const SdCardFontFamilyInfo* families[SdCardFontManager::kMaxTtfFamilies] = {};
   uint8_t found = 0;
+  int8_t firstAsked = -1;  // which of the wanted families the first found one is
   for (uint8_t i = 0; i < count && found < SdCardFontManager::kMaxTtfFamilies; ++i) {
     const SdCardFontFamilyInfo* family = findFamily(wantedFamilies[i]);
-    if (family && (found == 0 || (family->ttf() && families[0]->ttf()))) families[found++] = family;
+    if (family && (found == 0 || (family->ttf() && families[0]->ttf()))) {
+      if (found == 0) firstAsked = static_cast<int8_t>(i);
+      families[found++] = family;
+    }
   }
   if (found == 0) {
     if (!manager_.currentFamilyName().empty()) manager_.unloadAll(renderer);
     return;
+  }
+  // The reader's own family, the one every book shares: the setting's family, and neither the book's own body
+  // family nor a font chosen for that book alone. The rest are the book's (its accent families, or its body
+  // family), and they are drawn from the store in RAM where the board has the memory for it: the font partition
+  // keeps the reader's family alone, so the next book does not install it again and the flash is not erased.
+  uint8_t globalCount = 0;
+  if (firstAsked == 0 && bookFamilyName()[0] == '\0') {
+    const char* wanted = wantedFamilies[0];
+    const bool theSetting = wanted != nullptr && std::strcmp(wanted, SETTINGS.sdFontFamilyName) == 0;
+    globalCount = (theSetting || count == 1) ? 1 : 0;
   }
   const SdCardFontFamilyInfo* family = families[0];
   const uint8_t targetPt = sizeListFor(family->name.c_str()).snap(pointSize);
@@ -443,8 +457,9 @@ void SdCardFontSystem::ensureLoaded(GfxRenderer& renderer, const char* const* wa
   // Both now agree: the closest face is loaded and the requested size is served from it, scaled,
   // under an alias ID (SdCardFontManager::ensureSizeAlias). The chosen typeface AND the chosen
   // size, which is what the setting promised.
-  const bool loaded = found > 1 ? manager_.loadTtfFamilies(families, found, renderer, targetPt, onColdLoad)
-                                : manager_.loadFamily(*family, renderer, targetPt, onColdLoad, policy, arena);
+  const bool loaded = found > 1
+                          ? manager_.loadTtfFamilies(families, found, renderer, targetPt, onColdLoad, globalCount)
+                          : manager_.loadFamily(*family, renderer, targetPt, onColdLoad, policy, arena, globalCount);
   if (!loaded) LOG_ERR("SDFS", "Failed to load SD font family: %s", family->name.c_str());
 }
 

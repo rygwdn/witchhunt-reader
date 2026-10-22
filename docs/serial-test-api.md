@@ -535,6 +535,17 @@ a wipe waits for the next book open; `renders` and `hits` the glyphs drawn from 
 since the set loaded. `fills`, `wipes` and `last_wipe_ms` count since boot, whichever set was loaded. With no
 TrueType family loaded the set's fields are replaced by `none`: `TTF:none fills=0 wipes=0 last_wipe_ms=0`.
 
+On a board with PSRAM (the X4 Pro, the T5S3) a book's own families (its accent families, or its body family) are
+drawn from a store in RAM, and the font partition keeps the reader's family alone: the partition's set never
+changes, so the next book does not install it again and the flash is not erased. The RAM store's fields follow, with
+a `ram_` prefix: `ram_families`, `ram_names`, `ram_sd`, `ram_log_used`, `ram_log_size`, `ram_slots`, `ram_renders`
+and `ram_hits`. The partition's fields are the reader's own family, and are absent when the book supplies the body
+family (the partition is not used at all then):
+
+```
+TTF:families=1 names=NotoSansTC sd=1 log_used=80800 log_size=1835008 slots=512 ring=0 pending=0 renders=540 hits=2210 ram_families=2 ram_names=book:Inter,book:Ubuntu sd=0 ram_log_used=4096 ram_log_size=917504 ram_slots=64 ram_renders=12 ram_hits=340 fills=0 wipes=1 last_wipe_ms=1312
+```
+
 `CMD:TTF:FULL` makes the store act as if it had just filled up: `TTF_OK:full`, or `TTF_ERROR:no TrueType family
 loaded`. New glyphs go to the ring and the wipe is pending, exactly as when the log runs out, so what a full store
 does can be tested at any size without reading until it fills. Development builds only.

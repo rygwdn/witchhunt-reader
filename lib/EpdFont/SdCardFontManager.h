@@ -1,5 +1,7 @@
 #pragma once
 
+#include <ttf/RamFontStore.h>
+
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -49,9 +51,12 @@ class SdCardFontManager {
   // A TTF family (SdCardFontFamilyInfo::ttf) is drawn by a TtfFont at targetPtSize itself, from the
   // glyph store in the same partition; onColdLoad fires before it is installed there. Read-only
   // (preview) loads of a TTF family are refused.
+  //
+  // `globalFamilies` says whether the family is the reader's own (kMaxTtfFamilies) or the book's (0): a book's
+  // family is drawn from the store in RAM where the board has the memory for it (see loadTtfFamilies).
   bool loadFamily(const SdCardFontFamilyInfo& family, GfxRenderer& renderer, uint8_t targetPtSize,
                   const std::function<void()>& onColdLoad = {}, FlashCachePolicy policy = FlashCachePolicy::ReadWrite,
-                  BuildArena* arena = nullptr);
+                  BuildArena* arena = nullptr, uint8_t globalFamilies = kMaxTtfFamilies);
 
   // TTF families drawn together from one glyph store (TtfFontSet, spec 11.1), the body's first: the reader's font
   // or the book's body family, and a book's accent families beside it (BookFonts::kMaxAccents).
@@ -61,8 +66,15 @@ class SdCardFontManager {
   // font area or the store's style blocks, a family other than the first cannot be read), families are left out
   // from the end, the least used accent first, until the rest can; never the first. False when even the first
   // cannot.
+  //
+  // `globalFamilies`: how many of the families, from the first, are the reader's own and every book's alike; the
+  // rest belong to the book (its accent families, or its body family when the book supplies it). Where the board
+  // has the RAM for it, the book's families are drawn from a store in RAM and the font partition keeps the
+  // reader's family alone: that store's set never changes, so the next book does not install it again, the flash
+  // is not erased, and the reader's glyphs stay cached. kMaxTtfFamilies: every family is the reader's own.
   bool loadTtfFamilies(const SdCardFontFamilyInfo* const* families, uint8_t count, GfxRenderer& renderer,
-                       uint8_t targetPtSize, const std::function<void()>& onColdLoad = {});
+                       uint8_t targetPtSize, const std::function<void()>& onColdLoad = {},
+                       uint8_t globalFamilies = kMaxTtfFamilies);
   // True when the TTF families last loaded were asked for as these, in this order, from the same files: a book's
   // family is told from another book's of the same name by its files (SdCardFontFamilyInfo::filesKey).
   bool ttfFamiliesLoaded(const SdCardFontFamilyInfo* const* families, uint8_t count) const;
@@ -87,10 +99,16 @@ class SdCardFontManager {
   bool setTtfBodySize(GfxRenderer& renderer, uint8_t pointSize);
   // Runs the TTF glyph store's pending wipe (it filled up), calling onBusy first. Only at book open.
   void wipeTtfIfPending(const std::function<void()>& onBusy);
-  bool ttfLoaded() const { return ttfSet_ != nullptr; }
+  bool ttfLoaded() const { return ttfSet_ != nullptr || ttfRamSet_ != nullptr; }
   // The loaded set, for the serial test API (CMD:TTF): nullptr when none is loaded or it is suspended. Only under
-  // RenderLock, as every use of the set.
+  // RenderLock, as every use of the set. The reader's own families are in it; the book's own families are in the
+  // RAM store, ttfRamSet().
   TtfFontSet* ttfSet() const { return ttfSet_.get(); }
+  // The set of the book's own families, drawn from the store in RAM; nullptr when there is none (no PSRAM, no
+  // book's families, or the set is suspended).
+  TtfFontSet* ttfRamSet() const { return ttfRamSet_.get(); }
+  // How many of the loaded families are the reader's own: the rest are the book's, in the RAM store.
+  uint8_t ttfGlobalCount() const { return ttfGlobalCount_; }
 
   // What the loaded TTF families' misses made on the heap, freed (TtfFontSet::releaseMissMemory): the next miss makes
   // it again. The bytes freed: 0 when none is loaded or nothing was held.
@@ -151,13 +169,20 @@ class SdCardFontManager {
     std::string name;
     uint32_t identityHash = 0;
     int fontId = 0;
-    int32_t nativeBase = 0;  // 0: none
+    int32_t nativeBase = 0;     // 0: none
+    TtfFontSet* set = nullptr;  // the set that draws it: the reader's own, in the font partition, or the book's, in RAM
+    uint8_t index = 0;          // its index in that set
   };
   struct TtfSources;
   // Whether loadTtfFamilies() leaves families out when they cannot load together, or loads exactly these.
   enum class TtfChoice : uint8_t { FewerIfNeeded, ExactlyThese };
   bool loadTtf(const SdCardFontFamilyInfo* const* families, uint8_t count, GfxRenderer& renderer, uint8_t targetPtSize,
-               const std::function<void()>& onColdLoad, TtfChoice choice);
+               const std::function<void()>& onColdLoad, TtfChoice choice, uint8_t globalFamilies);
+  // The load itself, with the first `global` families in the font partition and the rest in the store in RAM.
+  bool loadTtfIn(const SdCardFontFamilyInfo* const* families, uint8_t count, GfxRenderer& renderer,
+                 uint8_t targetPtSize, const std::function<void()>& onColdLoad, TtfChoice choice, uint8_t global);
+  // The font of a loaded family, from the set that draws it.
+  TtfFont* ttfFontOf(uint8_t family) const;
   static int computeFontId(uint32_t contentHash, const char* familyName, uint8_t pointSize);
   // The loaded TTF set closed and its font IDs out of the renderer: unloadAll() and suspendTtf(). The families'
   // names, font IDs and windows stay.
@@ -183,9 +208,14 @@ class SdCardFontManager {
   std::unique_ptr<NorFlash> ttfFlash_;
   std::unique_ptr<TtfSources> ttfSources_;
   std::unique_ptr<TtfFontSet> ttfSet_;
+  // The book's own families, in the store in RAM: the buffer and its device, and the set drawn from it. The set is
+  // destroyed first, so the device is closed before the buffer it reads goes.
+  RamFontStore ttfRam_;
+  std::unique_ptr<TtfFontSet> ttfRamSet_;
   TtfFamily ttfFamilies_[kMaxTtfFamilies];  // the set's families, in its order
   uint8_t ttfCount_ = 0;
-  uint32_t ttfAsked_ = 0;  // the families the load was asked for (ttfFamiliesLoaded)
+  uint8_t ttfGlobalCount_ = 0;  // how many of them are the reader's own; the rest are the book's
+  uint32_t ttfAsked_ = 0;       // the families the load was asked for (ttfFamiliesLoaded)
   // suspendTtf(): the set is gone, its families' names and font IDs kept for resumeTtf().
   bool ttfSuspended_ = false;
 };

@@ -18,6 +18,7 @@
 #include "BuildArena.h"
 #include "EpdFontFamily.h"
 #include "GlyphProvider.h"
+#include "RamFlash.h"
 #include "SimNorFlash.h"
 #include "TtfBuilder.h"
 #include "TtfFont.h"
@@ -125,6 +126,7 @@ void operator delete[](void* p, size_t, const std::align_val_t alignment) noexce
 namespace {
 
 constexpr uint32_t kFlashBytes = 3538944 - 65536;  // the X3's font area: spiffs below the language slot
+constexpr uint32_t kRamBytes = 2 * 1024 * 1024;    // the store in RAM for a book's own families, on an S3
 constexpr uint8_t kRegular = 0;
 constexpr uint8_t kBold = 1;
 constexpr uint8_t kItalic = 2;
@@ -1179,6 +1181,48 @@ TEST_F(TtfFontSetTest, ASetChangedSinceTheInstallIsInstalledAgain) {
   ASSERT_TRUE(body.font(0)->setBodySize(14));
   expectDrawnAs(reference(files[kRegular].bytes, 'A', 14), *body.font(0), kRegular, body.font(0)->glyph(kRegular, 'A'));
   EXPECT_EQ(1u, body.font(0)->renders());  // the install emptied the store
+}
+
+// The reader's own family stays in the font partition while the book's own families are drawn from the store in
+// RAM: the partition's set does not change, so the next book does not install it again, the partition is not
+// written at all, and the reader's glyphs stay cached.
+TEST_F(TtfFontSetTest, TheReaderFamilyStaysInThePartitionWhileTheBookFamiliesAreInRam) {
+  SimNorFlash chip{kFlashBytes};
+  ttf::FileSource body[4];
+  for (int s = 0; s < 4; ++s) body[s] = files[s].source();
+  {
+    TtfFontSet reader(chip);
+    ASSERT_TRUE(reader.load(&body, 1, kIdentityA, [this] { ++busy; }));
+    ASSERT_TRUE(reader.font(0)->setBodySize(14));
+    ASSERT_NE(nullptr, reader.font(0)->glyph(kRegular, 'A'));  // drawn, and kept in the partition
+  }
+  const uint32_t programs = chip.programCalls();
+  const uint32_t erases = chip.totalSectorErases();
+  ASSERT_GT(programs, 0u);
+
+  // The book's accent family, in the store in RAM.
+  std::vector<uint8_t> buffer(kRamBytes, 0xFF);
+  RamFlash ram{buffer.data(), kRamBytes};
+  ttf::FileSource accents[4];
+  for (int s = 0; s < 4; ++s) accents[s] = accent[s].source();
+  TtfFontSet book(ram);
+  ASSERT_TRUE(book.load(&accents, 1, kIdentitySet, [this] { ++busy; }));
+  EXPECT_EQ(programs, chip.programCalls());  // the partition was not written
+  EXPECT_EQ(erases, chip.totalSectorErases());
+
+  // Another book: its accent family is installed in RAM again, and the partition keeps the reader's family.
+  TtfFontSet nextBook(ram);
+  ASSERT_TRUE(nextBook.load(&accents, 1, kIdentityB, [this] { ++busy; }));
+  EXPECT_EQ(programs, chip.programCalls());
+  EXPECT_EQ(erases, chip.totalSectorErases());
+
+  // The reader's family is still in the partition, with its glyph: read from the store, not drawn again.
+  TtfFontSet again(chip);
+  ASSERT_TRUE(again.load(&body, 1, kIdentityA, [this] { ++busy; }));
+  EXPECT_EQ(programs, chip.programCalls());
+  ASSERT_TRUE(again.font(0)->setBodySize(14));
+  EXPECT_EQ(0u, again.font(0)->renders());
+  EXPECT_NE(nullptr, again.font(0)->glyph(kRegular, 'A'));
 }
 
 TEST_F(TtfFontSetTest, TheFamiliesInAnotherOrderAreAnotherSet) {

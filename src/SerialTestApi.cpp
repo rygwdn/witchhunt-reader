@@ -822,11 +822,13 @@ void cmdHeap(const std::string_view arg) {
 
 // ---- TTF ------------------------------------------------------------------------------------
 
-// CMD:TTF's fields for a loaded set. Under RenderLock.
+// CMD:TTF's fields for a loaded set. Under RenderLock. The reader's own families are drawn from the font
+// partition, the book's own families from the store in RAM: two sets, each with its own fields, the RAM ones
+// with a "ram_" prefix.
 void appendStats(std::string& line, const TtfFontSet& set) {
   const TtfFontSet::Stats s = set.stats();
   std::string names;
-  for (uint8_t f = 0; f < sdFontSystem.ttfFamilyCount(); ++f) {
+  for (uint8_t f = 0; f < sdFontSystem.ttfGlobalCount(); ++f) {
     if (f > 0) names += ',';
     names += sdFontSystem.ttfFamilyName(f);
   }
@@ -842,6 +844,24 @@ void appendStats(std::string& line, const TtfFontSet& set) {
   appendField(line, "hits", static_cast<long>(s.hits));
 }
 
+// CMD:TTF's fields for the store in RAM, where the book's own families are drawn. Under RenderLock.
+void appendRamStats(std::string& line, const TtfFontSet& set) {
+  const TtfFontSet::Stats s = set.stats();
+  std::string names;
+  for (uint8_t f = sdFontSystem.ttfGlobalCount(); f < sdFontSystem.ttfFamilyCount(); ++f) {
+    if (f > sdFontSystem.ttfGlobalCount()) names += ',';
+    names += sdFontSystem.ttfFamilyName(f);
+  }
+  appendField(line, "ram_families", static_cast<long>(s.families));
+  appendField(line, "ram_names", names);
+  appendField(line, "ram_sd", s.readsCard ? 1L : 0L);
+  appendField(line, "ram_log_used", static_cast<long>(s.logUsed));
+  appendField(line, "ram_log_size", static_cast<long>(s.logSize));
+  appendField(line, "ram_slots", static_cast<long>(s.usedSlots));
+  appendField(line, "ram_renders", static_cast<long>(s.renders));
+  appendField(line, "ram_hits", static_cast<long>(s.hits));
+}
+
 // CMD:TTF: what the loaded TrueType set and its glyph store hold. CMD:TTF:FULL: the store acts as if it had just filled
 // up (TtfFontSet::markFull), so what a full store does can be watched at any size.
 void cmdTtf(const std::string_view arg) {
@@ -854,12 +874,15 @@ void cmdTtf(const std::string_view arg) {
   {
     RenderLock lock;  // the set is the render task's too; the reply goes out once it is released
     TtfFontSet* set = sdFontSystem.ttfSet();
+    TtfFontSet* ram = sdFontSystem.ttfRamSet();
     if (arg == "FULL") {
-      line = set && set->markFull() ? "TTF_OK:full" : "TTF_ERROR:no TrueType family loaded";
-    } else if (!set) {
+      TtfFontSet* full = set ? set : ram;  // the partition's store, or the book's when the partition is not used
+      line = full && full->markFull() ? "TTF_OK:full" : "TTF_ERROR:no TrueType family loaded";
+    } else if (!set && !ram) {
       line += "none";
     } else {
-      appendStats(line, *set);
+      if (set) appendStats(line, *set);
+      if (ram) appendRamStats(line, *ram);
     }
   }
   if (arg != "FULL") {

@@ -1,5 +1,6 @@
 add_executable(GlyphStoreTest
   SimNorFlashTest.cpp
+  RamFlashTest.cpp
   GlyphStoreFormatTest.cpp
   GlyphStoreInstallTest.cpp
   GlyphStoreRecoveryTest.cpp
@@ -8,6 +9,7 @@ add_executable(GlyphStoreTest
   GlyphStorePowerCutTest.cpp
   ${REPO_ROOT}/lib/EpdFont/ttf/GlyphStoreFormat.cpp
   ${REPO_ROOT}/lib/EpdFont/ttf/FlashGlyphStore.cpp
+  ${REPO_ROOT}/lib/EpdFont/ttf/RamFlash.cpp
   ${REPO_ROOT}/test/zip_entry_reader/LoggingStub.cpp
 )
 
