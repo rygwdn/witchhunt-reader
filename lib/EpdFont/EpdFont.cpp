@@ -271,6 +271,19 @@ EpdGlyphRef EpdFont::getGlyphSlow(const uint32_t cp) const {
   // otherwise a row of identical rectangles. See GlyphFallback.h; this only
   // runs once the real glyph has been ruled out, so a font that has the
   // character is never second-guessed.
+  //
+  // A publisher's font is often a subset that carries one case of a letter but not the other (a
+  // heading font with the capitals only). The other case of the same letter is the closest thing
+  // to the letter asked for, and the same font usually has it. It is drawn at ITS advance, so the
+  // word measures as it is drawn. The letter's own glyph always wins: this runs only after the
+  // real one has been ruled out.
+  const uint32_t upper = utf8UpperCodepoint(cp);
+  const uint32_t lower = utf8LowerCodepoint(cp);
+  const uint32_t otherCase = upper != cp ? upper : (lower != cp ? lower : cp);
+  if (otherCase != cp) {
+    if (const EpdGlyphRef glyph = findGlyph(otherCase)) return glyph;
+  }
+
   const uint32_t substitute = fallbackGlyphCodepoint(cp);
   if (substitute != cp) {
     if (const EpdGlyphRef glyph = findGlyph(substitute)) return glyph;
