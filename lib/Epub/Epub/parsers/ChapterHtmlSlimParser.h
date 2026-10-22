@@ -303,6 +303,10 @@ class ChapterHtmlSlimParser final : public Print {
     bool hasSup = false, sup = false;
     bool hasSub = false, sub = false;
     bool hasSmallCaps = false, smallCaps = false;
+    // text-transform: the case the text is displayed in. Inherited like every CSS property it
+    // inherits, and an explicit `none` cancels an uppercase set on an ancestor.
+    bool hasTextTransform = false;
+    CssTextTransform textTransform = CssTextTransform::None;
     bool hasMarginLeft = false;
     int16_t marginLeftPx = 0;  // margin-left in pixels, for span-level poem indents
     // Inline font-size as a percent of the PARENT element's size (em semantics).
@@ -325,6 +329,8 @@ class ChapterHtmlSlimParser final : public Print {
   bool effectiveSup = false;
   bool effectiveSub = false;
   bool effectiveSmallCaps = false;
+  // The transform in force for the words being flushed (CSS text-transform).
+  CssTextTransform effectiveTextTransform = CssTextTransform::None;
   int16_t effectiveInlineMarginLeft = 0;  // accumulated margin-left from inline span stack
   // Composed inline font-size percent (relative to the block font size) for the
   // words currently being flushed. 100 outside sized spans; clamped to the
@@ -683,6 +689,11 @@ class ChapterHtmlSlimParser final : public Print {
   // Fold an element's CSS font-size (multiplier relative to its parent) into an inline
   // style-stack entry.
   static void applyCssFontSizeToEntry(StyleStackEntry& entry, const CssStyle& cssStyle);
+  // Fold an element's CSS text-transform into an inline style-stack entry.
+  static void applyCssTextTransformToEntry(StyleStackEntry& entry, const CssStyle& cssStyle);
+  // Apply the effective text-transform to the word buffer in place, before the layout measures
+  // it. See the definition for what it does and does not change.
+  void applyTextTransformToWordBuffer();
   // Apply kSupSubDefaultSizePct when the entry resolves to sup/sub. Call BEFORE
   // applyCssFontSizeToEntry so publisher CSS (e.g. `.sup { font-size: 0.7em }`) wins.
   static void applySupSubDefaultSize(StyleStackEntry& entry);

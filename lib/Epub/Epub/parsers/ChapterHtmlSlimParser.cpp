@@ -583,6 +583,14 @@ namespace {
 // (updateEffectiveInlineStyle) and the block channel (normalizeFontSizeForElement) so a
 // publisher's near-body size is treated the same whichever one it arrives on.
 constexpr int nearBodyDeadZonePct(const bool normalizationEnabled) { return normalizationEnabled ? 10 : 3; }
+
+// The UTF-8 length of a codepoint: how many bytes it takes in the word buffer.
+size_t utf8LengthOfCodepoint(const uint32_t cp) {
+  if (cp < 0x80) return 1;
+  if (cp < 0x800) return 2;
+  if (cp < 0x10000) return 3;
+  return 4;
+}
 }  // namespace
 
 // Update effective bold/italic/underline from the style stack. Blocks are on it too
@@ -595,6 +603,7 @@ void ChapterHtmlSlimParser::updateEffectiveInlineStyle() {
   effectiveSup = false;
   effectiveSub = false;
   effectiveSmallCaps = false;
+  effectiveTextTransform = CssTextTransform::None;
   effectiveInlineMarginLeft = 0;
   effectiveFontFamily_ = 0;
   // Inline font-size composes multiplicatively through the stack (em is relative to
@@ -639,6 +648,9 @@ void ChapterHtmlSlimParser::updateEffectiveInlineStyle() {
     }
     if (entry.hasSmallCaps) {
       effectiveSmallCaps = entry.smallCaps;
+    }
+    if (entry.hasTextTransform) {
+      effectiveTextTransform = entry.textTransform;
     }
     if (entry.hasMarginLeft) {
       effectiveInlineMarginLeft = entry.marginLeftPx;
@@ -717,6 +729,16 @@ void ChapterHtmlSlimParser::applyCssEmphasisToEntry(StyleStackEntry& entry, cons
     entry.hasSmallCaps = true;
     entry.smallCaps = cssStyle.smallCaps;
   }
+  applyCssTextTransformToEntry(entry, cssStyle);
+}
+
+// An element's CSS text-transform, folded into an inline style-stack entry. A defined value
+// travels up the stack, so an inner element with `text-transform: none` cancels an uppercase
+// set on an ancestor.
+void ChapterHtmlSlimParser::applyCssTextTransformToEntry(StyleStackEntry& entry, const CssStyle& cssStyle) {
+  if (!cssStyle.hasTextTransform()) return;
+  entry.hasTextTransform = true;
+  entry.textTransform = cssStyle.textTransform;
 }
 
 // A block's emphasis used to sit in one slot (currentCssStyle) that each nested block overwrote
@@ -729,7 +751,7 @@ void ChapterHtmlSlimParser::pushBlockStyleEntry(const CssStyle& cssStyle) {
   StyleStackEntry entry;
   entry.depth = depth;
   if (!applyCssFontFamilyToEntry(entry, cssStyle) && !cssStyle.hasFontWeight() && !cssStyle.hasFontStyle() &&
-      !cssStyle.hasTextDecoration() && !cssStyle.hasSmallCaps()) {
+      !cssStyle.hasTextDecoration() && !cssStyle.hasSmallCaps() && !cssStyle.hasTextTransform()) {
     return;
   }
   applyCssEmphasisToEntry(entry, cssStyle);
@@ -1087,10 +1109,78 @@ bool ChapterHtmlSlimParser::recoverHeapForImageHeader() {
   return true;
 }
 
+// The case the book asks the text to be DISPLAYED in (CSS text-transform), applied to the word
+// buffer before the layout measures it.
+//
+// It is applied to the word, not to the source text: the parser's visible-text offsets, the
+// dictionary and the search all read the source, and only the drawn characters change. Applying
+// it here (and not at draw time) is what makes the measured widths the widths of the glyphs that
+// are actually drawn.
+//
+// A mapping is applied only when the mapped codepoint has the same UTF-8 length, so the word's
+// bytes -- and the offsets derived from them -- stay as they were. A letter whose capital is
+// more than one letter (the German sharp s) is left as it is.
+void ChapterHtmlSlimParser::applyTextTransformToWordBuffer() {
+  if (effectiveTextTransform == CssTextTransform::None || partWordBufferIndex == 0) return;
+
+  const auto* const base = reinterpret_cast<const unsigned char*>(partWordBuffer);
+  const unsigned char* p = base;
+  const unsigned char* const end = base + partWordBufferIndex;
+  bool atWordStart = true;
+
+  while (p < end) {
+    const unsigned char* const start = p;
+    const uint32_t cp = utf8NextCodepoint(&p);
+    if (cp == 0) break;
+    const size_t originalBytes = static_cast<size_t>(p - start);
+
+    uint32_t mapped = cp;
+    switch (effectiveTextTransform) {
+      case CssTextTransform::Uppercase:
+        mapped = utf8UpperCodepoint(cp);
+        break;
+      case CssTextTransform::Lowercase:
+        mapped = utf8LowerCodepoint(cp);
+        break;
+      case CssTextTransform::Capitalize:
+        // The first letter of the word only; the rest of it keeps its own case.
+        mapped = atWordStart ? utf8UpperCodepoint(cp) : cp;
+        break;
+      case CssTextTransform::None:
+        break;
+    }
+    atWordStart = false;
+
+    if (mapped == cp || utf8LengthOfCodepoint(mapped) != originalBytes) continue;
+
+    // The mapped codepoint takes the same number of bytes, so it goes over the old ones.
+    char encoded[4];
+    size_t at = 0;
+    if (mapped < 0x80) {
+      encoded[at++] = static_cast<char>(mapped);
+    } else if (mapped < 0x800) {
+      encoded[at++] = static_cast<char>(0xC0 | (mapped >> 6));
+      encoded[at++] = static_cast<char>(0x80 | (mapped & 0x3F));
+    } else if (mapped < 0x10000) {
+      encoded[at++] = static_cast<char>(0xE0 | (mapped >> 12));
+      encoded[at++] = static_cast<char>(0x80 | ((mapped >> 6) & 0x3F));
+      encoded[at++] = static_cast<char>(0x80 | (mapped & 0x3F));
+    } else {
+      encoded[at++] = static_cast<char>(0xF0 | (mapped >> 18));
+      encoded[at++] = static_cast<char>(0x80 | ((mapped >> 12) & 0x3F));
+      encoded[at++] = static_cast<char>(0x80 | ((mapped >> 6) & 0x3F));
+      encoded[at++] = static_cast<char>(0x80 | (mapped & 0x3F));
+    }
+    memcpy(partWordBuffer + (start - base), encoded, at);
+  }
+}
+
 // flush the contents of partWordBuffer to currentTextBlock
 bool ChapterHtmlSlimParser::flushPartWordBuffer() {
   partWordCjkCodepoints_ = 0;  // the run being counted ends with this flush
   partWordLastWasCjk_ = false;
+  // The book's text-transform, before the layout measures the word.
+  applyTextTransformToWordBuffer();
   if (streamFailed) {
     partWordBufferIndex = 0;
     nextWordContinues = false;
@@ -2933,6 +3023,7 @@ void ChapterHtmlSlimParser::startElement(void* userData, const char* name, const
       // applyCssFontSizeToEntry is a no-op unless the link itself carries a font-size.
       applySupSubDefaultSize(entry);
       applyCssFontSizeToEntry(entry, cssStyle);
+      applyCssTextTransformToEntry(entry, cssStyle);
       self->inlineStyleStack.push_back(entry);
       self->updateEffectiveInlineStyle();
 
@@ -3274,6 +3365,7 @@ void ChapterHtmlSlimParser::startElement(void* userData, const char* name, const
       entry.italic = cssStyle.fontStyle == CssFontStyle::Italic;
     }
     applyCssFontSizeToEntry(entry, cssStyle);
+    applyCssTextTransformToEntry(entry, cssStyle);
     self->inlineStyleStack.push_back(entry);
     self->updateEffectiveInlineStyle();
   } else if (matches(name, BOLD_TAGS, NUM_BOLD_TAGS)) {
@@ -3307,6 +3399,7 @@ void ChapterHtmlSlimParser::startElement(void* userData, const char* name, const
       }
     }
     applyCssFontSizeToEntry(entry, cssStyle);
+    applyCssTextTransformToEntry(entry, cssStyle);
     self->inlineStyleStack.push_back(entry);
     self->updateEffectiveInlineStyle();
   } else if (matches(name, ITALIC_TAGS, NUM_ITALIC_TAGS)) {
@@ -3340,6 +3433,7 @@ void ChapterHtmlSlimParser::startElement(void* userData, const char* name, const
       }
     }
     applyCssFontSizeToEntry(entry, cssStyle);
+    applyCssTextTransformToEntry(entry, cssStyle);
     self->inlineStyleStack.push_back(entry);
     self->updateEffectiveInlineStyle();
   } else if (strcmp(name, "sup") == 0 || strcmp(name, "sub") == 0) {
@@ -3358,6 +3452,7 @@ void ChapterHtmlSlimParser::startElement(void* userData, const char* name, const
     }
     applySupSubDefaultSize(entry);
     applyCssFontSizeToEntry(entry, cssStyle);  // explicit CSS font-size overrides the 50% default
+    applyCssTextTransformToEntry(entry, cssStyle);
     self->inlineStyleStack.push_back(entry);
     self->updateEffectiveInlineStyle();
   } else if (strcmp(name, "span") == 0 || !isHeaderOrBlock(name)) {

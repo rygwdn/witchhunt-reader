@@ -114,9 +114,11 @@ class CssParser {
   // v28: `font-family` is parsed and persisted (its first family, hashed; see fontFamilyHash), and
   //      @font-face rules are recorded in a side file (see loadFontFaces). A v27 compile never
   //      looked at either, so a book's embedded fonts would stay unknown.
+  // v30: `text-transform` (the case the text is displayed in) is kept, so a rule that sets it
+  //      survives the compile and the style payload carries it.
   // v29: `font-family` also keeps the list's generic serif or sans-serif (CssFontFamily), which v28
   //      dropped.
-  static constexpr uint8_t CSS_CACHE_VERSION = 29;
+  static constexpr uint8_t CSS_CACHE_VERSION = 30;
   // Bytes before the complex-rule table and the sorted offset index: version(1) + ruleCount(2) +
   // totalSelectorCandidates(4) + unsupportedSelectorSkips(4) + flags(1) + complexTableBytes(2).
   static constexpr uint32_t CSS_CACHE_HEADER_BYTES = 14;

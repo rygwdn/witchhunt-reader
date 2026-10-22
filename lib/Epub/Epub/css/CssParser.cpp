@@ -102,8 +102,8 @@ constexpr size_t CSS_LENGTH_BYTES = sizeof(float) + sizeof(uint8_t);
 constexpr size_t CSS_FIXED_STYLE_BYTES = 4 * sizeof(uint8_t) + (CSS_LENGTH_FIELD_COUNT * CSS_LENGTH_BYTES) +
                                          sizeof(uint8_t) + sizeof(uint16_t) + 2 * sizeof(uint8_t) + sizeof(uint8_t) +
                                          sizeof(uint8_t) + sizeof(float) + sizeof(uint8_t) + sizeof(uint8_t) +
-                                         sizeof(uint8_t) + sizeof(uint32_t);
-static_assert(CSS_FIXED_STYLE_BYTES == 77,
+                                         sizeof(uint8_t) + sizeof(uint8_t) + sizeof(uint32_t);
+static_assert(CSS_FIXED_STYLE_BYTES == 78,
               "style payload layout changed — update read/writeCssStylePayload and bump CSS_CACHE_VERSION");
 // A rule record is selectorLen(2) selector order(2) payload; the order sits between selector and
 // payload so a reader that has matched the selector reads the rest in one go (v22).
@@ -898,6 +898,24 @@ void CssParser::parseDeclarationIntoStyle(const std::string_view decl, CssStyle&
       style.smallCaps = false;
       style.defined.smallCaps = 1;
     }
+  } else if (propNameBuf == "text-transform") {
+    // The case the text is DISPLAYED in. The source text keeps its own case; the layout gets the
+    // transformed characters, so a heading font that carries only one case still draws.
+    if (propValueBuf == "uppercase") {
+      style.textTransform = CssTextTransform::Uppercase;
+      style.defined.textTransform = 1;
+    } else if (propValueBuf == "lowercase") {
+      style.textTransform = CssTextTransform::Lowercase;
+      style.defined.textTransform = 1;
+    } else if (propValueBuf == "capitalize") {
+      style.textTransform = CssTextTransform::Capitalize;
+      style.defined.textTransform = 1;
+    } else if (propValueBuf == "none") {
+      // Explicit none: it cancels an uppercase set on an ancestor, so it is a DEFINED value.
+      style.textTransform = CssTextTransform::None;
+      style.defined.textTransform = 1;
+    }
+    // `inherit` stays unset: the element takes its parent's value.
   } else if (propNameBuf == "float") {
     const std::string_view val = propValueBuf;
     if (val == "left") {
@@ -1798,6 +1816,12 @@ bool CssParser::readCssStylePayload(FsFile& file, CssStyle& style) {
   style.defined.opacityZero = (visibilityFlags & 0x08) != 0 ? 1 : 0;
   style.visibilityHidden = (visibilityFlags & 0x10) != 0;
   style.defined.visibilityHidden = (visibilityFlags & 0x20) != 0 ? 1 : 0;
+  uint8_t transformFlags = 0;
+  if (file.read(&transformFlags, 1) != 1) {
+    return false;
+  }
+  style.defined.textTransform = (transformFlags & 0x01) != 0 ? 1 : 0;
+  style.textTransform = static_cast<CssTextTransform>((transformFlags >> 1) & 0x03);
   return file.read(&style.fontFamily, sizeof(style.fontFamily)) == sizeof(style.fontFamily);
 }
 
@@ -1876,6 +1900,10 @@ void CssParser::writeCssStylePayload(FsFile& file, const CssStyle& style) {
                                   (style.defined.opacityZero ? 0x08 : 0x00) | (style.visibilityHidden ? 0x10 : 0x00) |
                                   (style.defined.visibilityHidden ? 0x20 : 0x00);
   put8(visibilityFlags);
+  // text-transform: bit 0 = defined, bits 1-2 = the value.
+  const uint8_t transformFlags = (style.defined.textTransform ? 0x01 : 0x00) |
+                                 (static_cast<uint8_t>(style.textTransform) << 1);
+  put8(transformFlags);
   put(&style.fontFamily, sizeof(style.fontFamily));
   file.write(payload.data(), at);
 }
@@ -2226,6 +2254,11 @@ static size_t compressStyle(const CssStyle& s, uint8_t* out) {
   if (s.defined.fontStyle && s.fontStyle == CssFontStyle::Inherit) extra |= 0x02;
   if (s.defined.fontSizeMultiplier && s.fontSizeRootRelative) extra |= 0x04;
   if (s.defined.fontFamily) extra |= 0x08;
+  // text-transform: bit 4 = defined, bits 5-6 = the value.
+  if (s.defined.textTransform) {
+    extra |= 0x10;
+    extra |= static_cast<uint8_t>((static_cast<unsigned>(s.textTransform) & 0x3u) << 5);
+  }
   if (extra != 0) mask |= 1u << 31;
   std::memcpy(p, &mask, 4);
   p += 4;
@@ -2319,6 +2352,8 @@ static void decompressStyle(const uint8_t* in, CssStyle& out) {
   d.opacityZero = isDefined(25);
   d.visibilityHidden = isDefined(26);
   d.fontFamily = (extra & 0x08) != 0 ? 1 : 0;
+  d.textTransform = (extra & 0x10) != 0 ? 1 : 0;
+  if (d.textTransform) out.textTransform = static_cast<CssTextTransform>((extra >> 5) & 0x03);
   if (d.colorTransparent) out.colorTransparent = ((mask >> 27) & 1u) != 0;
   if (d.opacityZero) out.opacityZero = ((mask >> 28) & 1u) != 0;
   if (d.visibilityHidden) out.visibilityHidden = ((mask >> 29) & 1u) != 0;

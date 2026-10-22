@@ -71,6 +71,11 @@ enum class CssVerticalAlign : uint8_t { Baseline = 0, Super = 1, Sub = 2 };
 // Float options — used to detect inline images beside paragraph text
 enum class CssFloat : uint8_t { None = 0, Left = 1, Right = 2 };
 
+// The case the text is DISPLAYED in (CSS text-transform). The source text keeps its own case:
+// only the characters handed to the layout change, so a book's search and dictionary still see
+// the words as they were written.
+enum class CssTextTransform : uint8_t { None = 0, Uppercase = 1, Lowercase = 2, Capitalize = 3 };
+
 // Bitmask for tracking which properties have been explicitly set
 struct CssPropertyFlags {
   uint32_t textAlign : 1;
@@ -104,6 +109,7 @@ struct CssPropertyFlags {
   uint32_t opacityZero : 1;
   uint32_t visibilityHidden : 1;
   uint32_t fontFamily : 1;
+  uint32_t textTransform : 1;
 
   CssPropertyFlags()
       : textAlign(0),
@@ -133,14 +139,15 @@ struct CssPropertyFlags {
         colorTransparent(0),
         opacityZero(0),
         visibilityHidden(0),
-        fontFamily(0) {}
+        fontFamily(0),
+        textTransform(0) {}
 
   [[nodiscard]] bool anySet() const {
     return textAlign || fontStyle || fontWeight || textDecoration || textIndent || marginTop || marginBottom ||
            marginLeft || marginRight || paddingTop || paddingBottom || paddingLeft || paddingRight || imageHeight ||
            imageWidth || display || verticalAlign || listStyleNone || pageBreakBefore || pageBreakAfter || lineHeight ||
            fontSizeMultiplier || cssFloat || smallCaps || colorTransparent || opacityZero || visibilityHidden ||
-           fontFamily;
+           fontFamily || textTransform;
   }
 
   void clearAll() {
@@ -150,6 +157,7 @@ struct CssPropertyFlags {
     imageHeight = imageWidth = display = verticalAlign = 0;
     listStyleNone = pageBreakBefore = pageBreakAfter = lineHeight = fontSizeMultiplier = cssFloat = 0;
     smallCaps = colorTransparent = opacityZero = visibilityHidden = fontFamily = 0;
+    textTransform = 0;
   }
 };
 
@@ -196,6 +204,8 @@ struct CssStyle {
   bool fontSizeRootRelative = false;
   CssFloat cssFloat = CssFloat::None;  // float: left/right — signals inline image context
   bool smallCaps = false;              // font-variant: small-caps
+  // text-transform: the case the text is displayed in. None leaves the text as it is.
+  CssTextTransform textTransform = CssTextTransform::None;
   // Text made invisible while still in the flow. A PDF-to-EPUB conversion emits every OCR word
   // as its own absolutely positioned div with `color: transparent` under a full-page scan; laid
   // out as ordinary text that became eleven pages of single words per scan (Deckhand).
@@ -216,7 +226,7 @@ struct CssStyle {
   CssPropertyFlags defined;  // Tracks which properties were explicitly set
 
   // Number of properties applyOver() merges: the size of its `ranks` array.
-  static constexpr int kCascadeProperties = 28;
+  static constexpr int kCascadeProperties = 29;
 
   // Apply properties from another style, only overwriting if the other style
   // has that property explicitly defined.
@@ -350,6 +360,12 @@ struct CssStyle {
       fontFamily = base.fontFamily;
       defined.fontFamily = 1;
     }
+    // text-transform is an inherited property, so an explicit `none` has to travel up the
+    // cascade too: it cancels an uppercase set on an ancestor.
+    if (base.defined.textTransform && take(defined.textTransform, 28)) {
+      textTransform = base.textTransform;
+      defined.textTransform = 1;
+    }
   }
 
   // An explicit `inherit` is defined (it overrides lower rules in applyOver) but reports as unset:
@@ -377,6 +393,8 @@ struct CssStyle {
   [[nodiscard]] bool hasListStyleNone() const { return defined.listStyleNone; }
   [[nodiscard]] bool hasCssFloat() const { return defined.cssFloat; }
   [[nodiscard]] bool hasSmallCaps() const { return defined.smallCaps; }
+  // An explicit `text-transform: none` counts as set: it cancels an inherited uppercase.
+  [[nodiscard]] bool hasTextTransform() const { return defined.textTransform; }
   [[nodiscard]] bool hasColorTransparent() const { return defined.colorTransparent; }
   [[nodiscard]] bool hasOpacityZero() const { return defined.opacityZero; }
   [[nodiscard]] bool hasVisibilityHidden() const { return defined.visibilityHidden; }
@@ -422,6 +440,7 @@ struct CssStyle {
     fontSizeRootRelative = false;
     cssFloat = CssFloat::None;
     smallCaps = false;
+    textTransform = CssTextTransform::None;
     colorTransparent = false;
     opacityZero = false;
     visibilityHidden = false;

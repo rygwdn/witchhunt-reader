@@ -24,7 +24,7 @@
 namespace compiled {
 
 inline constexpr char kMagic[4] = {'W', 'B', 'C', '1'};
-inline constexpr uint8_t kVersion = 1;
+inline constexpr uint8_t kVersion = 2;
 
 // Per-word settings-independent data — the slice of today's TextBlock that survives
 // a relayout. No xpos: Stage-2 measurement computes it. bidiLevel is 0 for LTR books
