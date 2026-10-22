@@ -470,6 +470,7 @@ class Device:
         self.buf = b""
         self.tail = LogTail()
         self.log_mark = 0  # the log lines older than this are not matched by `expect`
+        self.deadline = None  # Optional monotonic host-session deadline; scripted mode is unbounded.
 
     @classmethod
     def serial(cls, port, log_path=None):
@@ -517,6 +518,8 @@ class Device:
         noted and the read gives up, so a frame that arrives out of band fails loudly instead
         of being decoded as text.
         """
+        if self.deadline is not None:
+            deadline = min(deadline, time.time() + max(0, self.deadline - time.monotonic()))
         while time.time() < deadline:
             nl = self.buf.find(b"\n")
             if nl >= 0:
@@ -539,6 +542,8 @@ class Device:
     def read_exact(self, size, deadline):
         """Exactly `size` raw bytes, or fewer if the deadline passes or the device is gone.
         The bytes are never decoded: this is where the screenshot frame comes from."""
+        if self.deadline is not None:
+            deadline = min(deadline, time.time() + max(0, self.deadline - time.monotonic()))
         while len(self.buf) < size and time.time() < deadline:
             data = self._read(min(65536, size - len(self.buf)))
             if not data:
@@ -567,6 +572,8 @@ class Device:
                 self.note(raw.decode("utf-8", errors="replace").rstrip("\r"))
 
     def send(self, text):
+        if self.deadline is not None and time.monotonic() >= self.deadline:
+            raise TimeoutError("host session deadline exceeded")
         self.drain()
         self.note(f">>> CMD:{text}")
         # The log lines from now on belong to this command: `expect` after it matches those.

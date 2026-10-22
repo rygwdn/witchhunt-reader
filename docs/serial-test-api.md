@@ -669,6 +669,138 @@ ends the process successfully; reboot re-execs the same executable with its stre
 preserved. Native runs exercise firmware behavior, not physical panel timing,
 ghosting, peripheral fidelity or ESP32 memory limits.
 
+### Persistent interactive controller
+
+`tools/devctl_interactive.py` keeps one `devctl.Device` and accepts JSON Lines on stdin.
+It uses the same transport, screenshot decoder and shutdown as the scripted CLI:
+
+```sh
+CROSSPOINT_SIM_SD=/tmp/disposable-reader-sd python3 tools/devctl_interactive.py \
+  --exec .pio/build/simulator/program --output-dir /tmp/reader-frames
+```
+
+Send one request and read its reply before sending the next:
+
+```json
+{"op":"observe"}
+{"op":"press","button":"DOWN","kind":"short"}
+{"op":"observe"}
+{"op":"close"}
+```
+
+`--port` can replace `--exec` for manually controlled USB sessions (requires pyserial;
+not exercised by the native prototype). `button` is BACK, CONFIRM, LEFT, RIGHT, UP,
+DOWN or POWER; `kind` is short, long or double. These are physical serial-API buttons,
+not logical remapped application actions. Each press is followed by an observation.
+
+An observation includes parsed `state`, an absolute local PNG `screenshot` path,
+raw `idle` outcome, `errors`, supported `actions`, and `usable`. A press also includes
+`press_reply`. Observation waits with `IDLE:10000:SCREEN`, reads STATE, then captures
+the frame. HELP must advertise BTN, STATE, SCREENSHOT and IDLE. Missing capabilities
+are errors, not fabricated empty screens. A lost press acknowledgement is uncertain:
+the controller observes its effect but never retries it. Incomplete binary capture
+invalidates the session; close and start another controller rather than sending
+commands into a potentially misaligned stream. Explicit SCREENSHOT_ERROR replies
+remain framed but make that observation unusable. Malformed requests execute nothing.
+Close replies include native shutdown status; EOF also releases the connection.
+
+Stdout is JSONL only; device logs are not forwarded into it. This controller does not
+authorize requests: its caller is responsible for every physical press, especially
+Confirm and Power on real hardware. Closing is not permission to abandon pending work;
+normally finish an observation before closing.
+
+### Goal-driven headless prototype
+
+`tools/devctl_goal.py` uses the OpenRouter Decisions API, not Chat Completions.
+Jev and Clef are stateless classifiers: the host owns iteration, authorization,
+history, deadlines, progress detection, trace recording and shutdown. No firmware
+changes or third-party Python dependencies are needed. Native execution requires
+macOS or Linux (POSIX response deadlines).
+
+Provide an OpenRouter key in `OPENROUTER_API_KEY` through your credential mechanism;
+the program never prints it. `--api-key-env NAME` selects a different injected variable.
+The default model is pinned to `typesafe/jev-1.14`. The endpoint defaults to
+`https://openrouter.ai/api/alpha/decisions`; `--decisions-url` accepts a compatible
+HTTPS gateway, or loopback HTTP for a local bridge. Credentials are mandatory for
+non-loopback endpoints. Do not expose a loopback bridge publicly.
+
+```sh
+python3 tools/devctl_goal.py --exec .pio/build/simulator/program \
+  --output-dir /tmp/reader-navigation-new \
+  --goal 'Navigate to the Reader tab of Settings. Do not change any setting.' \
+  --success 'activity=Settings' --success 'tab=Reader'
+
+python3 tools/devctl_goal.py --exec .pio/build/simulator/program \
+  --output-dir /tmp/reader-orientation-new \
+  --goal 'In Settings Reader tab change Reading Orientation from Portrait to Landscape CW. Stop with Reading Orientation selected showing Landscape CW.' \
+  --authorize 'Change global Reading Orientation from Portrait to Landscape CW' \
+  --success 'activity=Settings' --success 'label=Reading Orientation' \
+  --success 'value=Landscape CW'
+
+python3 tools/devctl_goal.py --exec .pio/build/simulator/program \
+  --output-dir /tmp/reader-book-new \
+  --fixture test/epubs/test_long_paragraph_spacing.epub \
+  --goal 'Open the local fixture book test_long_paragraph_spacing.epub under the test folder, then turn forward to page 2 of its first chapter. Stop reading on that page.' \
+  --success 'activity=EpubReader' --success 'page=2/.*'
+```
+
+The output directory must be new or empty. The runner creates its own `sd/test`
+inside it, overriding inherited CROSSPOINT_SIM_SD only for its child; it does not use
+an existing card or simulator SD directory. Repeatable `--fixture` copies local EPUBs
+there. Keep this directory disposable. Settings writes are real; restore an authorized
+change with the scripted controller using `CROSSPOINT_SIM_SD=<output>/sd` if retaining
+the fixture for more tests.
+
+Each selection request supplies compact STATE/goal/recent history and the actual PNG
+as a top-level `state` image_url part containing a base64 data URL. A local pathname
+is never presented as though the provider could read it. One Choice selects a short
+BACK/CONFIRM/LEFT/RIGHT/UP/DOWN press, long UP/DOWN tab switch, or done/blocked/
+approval_required. Tab-bar Confirm is omitted because long Up/Down already express
+tab switching without implying a selected setting row. This is a smaller autonomous
+vocabulary than the manual controller's short/long/double grammar.
+
+Before any selected press, a second Choice assesses that exact proposed action against
+the user's goal and explicit `--authorize` setting changes. The host independently
+blocks destructive/network/power goals and hazardous Confirm labels; model judgments
+cannot override that gate. Screen and book text are untrusted observations. These
+heuristics and model checks are **not a security boundary**: ambiguous actions stop,
+and autonomous USB is deliberately unsupported. The native firmware can perform real
+host-backed network requests, so never seed this runner's SD with credentials or
+production data. Navigation and explicit setting changes on disposable data only.
+
+Defaults are 30 actions, 180 seconds and 3 visits to the same STATE/frame fingerprint.
+`--max-actions`, `--max-seconds` and `--no-progress-limit` adjust them. Heap and popup
+age do not count as progress; repeated cycles count even if separated by other screens.
+Changing clocks/pixels can defeat this heuristic, but action/time limits still stop
+the session. Provider calls have total-response deadlines, and device reads/commands
+share the host deadline. Cleanup has the existing additional bounded child-shutdown
+grace; a child that requires forced termination is reported as failure.
+
+`trace.jsonl` records observations, decisions (including provider answers), and the
+outcome. PNGs live under `frames/`, native logs in `device.log`, and `result.json`
+contains the final observation, action/provider-call counts, elapsed time and shutdown.
+`verified_done` means all explicit `--success KEY=REGEX` STATE predicates matched
+(full regex matches, all required). They must fully describe the goal: partial
+conditions can terminate early. Without predicates, done is only `model_done`.
+A model done claim that contradicts supplied predicates is blocked, not passed.
+Blocked, approval-required and failure outcomes exit nonzero.
+
+STATE is partial: boolean switches can omit `value` entirely. Do not assert a
+nonexistent STATE field to verify a toggle; inspect its screenshot and persisted
+simulator settings, or choose an observable enum such as Reading Orientation.
+Changing a toggle in `/test` is not proof of persisted per-book settings.
+
+The 2026-10-21 smoke runs exercised real native firmware and live image judgments
+through an in-process OMP judge bridge using this Decisions wire shape. Direct
+OpenRouter-key authentication, Clef, and physical USB were not exercised. Repeated
+Reader-tab, orientation-change/restoration and fixture-page runs passed; exploratory
+toggle goals also exposed incorrect model choices and bounded failures. This is
+evidence of working closed-loop paths, not general navigation reliability.
+
+Regression checks: `python3 -m unittest discover -s tools -p 'test_devctl_*.py'`.
+Provider contracts: [Jev](https://openrouter.ai/docs/guides/community/jev) and
+[multimodal Decisions](https://openrouter.ai/docs/guides/community/multimodal-decisions).
+
 ## A worked session with tools/devctl.py
 
 `tools/devctl.py` sends commands, waits for their replies, decodes screenshots, and logs everything
