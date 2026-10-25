@@ -12,6 +12,7 @@
 struct KOReaderSyncJob {
   enum Kind { FETCH_PROGRESS, SILENT_PUSH };
   Kind kind = FETCH_PROGRESS;
+  bool opds = false;
 
   std::string primaryHash;
   std::string altHash;

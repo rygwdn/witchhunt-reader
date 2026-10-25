@@ -1,3 +1,6 @@
+#include "OpdsProgressActivity.h"
+#include "ReadingSessionTracker.h"
+#include "network/OpdsProgressSync.h"
 // KOReader sync handoff for EpubReaderActivity: launching a sync session (compare / pull / push /
 // auto-push-on-close) and applying a completed session's result back into live reader state. Split
 // out of EpubReaderActivity.cpp because this has almost no coupling to the render-pass state
@@ -114,6 +117,25 @@ bool EpubReaderActivity::onFinishedBookSyncRequested(void* ctx, const std::strin
                                                      const KOReaderSyncPostAction postAction,
                                                      const std::string& target) {
   auto* self = static_cast<EpubReaderActivity*>(ctx);
+  if (OpdsProgressSync::associated(bookPath)) {
+    self->suspendBackgroundWork();
+    {
+      RenderLock lock(*self);
+      self->section.reset();
+    }
+    globalReadingSessionTracker().end();
+    self->startActivityForResult(
+        std::make_unique<OpdsProgressActivity>(self->renderer, self->mappedInput, bookPath, true),
+        [postAction, target](const ActivityResult&) {
+          if (postAction == KOReaderSyncPostAction::OpenBook)
+            activityManager.goToReader(target);
+          else if (postAction == KOReaderSyncPostAction::OpdsSearch)
+            activityManager.goToBrowserWithSearch(target);
+          else
+            activityManager.goHome();
+        });
+    return true;
+  }
   if (!KOREADER_STORE.hasCredentials()) {
     LOG_DBG("ERS", "Finished-book sync requested without credentials; leaving navigation to the caller");
     return false;
@@ -139,7 +161,7 @@ bool EpubReaderActivity::tryAutoPushOnClose() {
   if (!SETTINGS.koSyncOnBookClose) {
     return false;
   }
-  if (!KOREADER_STORE.hasCredentials()) {
+  if (!KOREADER_STORE.hasCredentials() && !opdsSyncAssociated_) {
     return false;
   }
   // Zero is a real setting here, shown as "Always": no minimum, so even a session that turned no
@@ -162,11 +184,26 @@ bool EpubReaderActivity::tryAutoPushOnClose() {
   }
 
 #if CROSSPOINT_KOREADER_AUTOSYNC
-  if (AUTOSYNC_STATE.isPositionSynced(epub->getPath(), currentSpineIndex, section->currentPage)) {
+  if (!opdsSyncAssociated_ &&
+      AUTOSYNC_STATE.isPositionSynced(epub->getPath(), currentSpineIndex, section->currentPage)) {
     LOG_DBG("ERS", "Skipping AUTO_PUSH: spine %d page %d already synced", currentSpineIndex, section->currentPage);
     return false;
   }
 #endif  // CROSSPOINT_KOREADER_AUTOSYNC
+
+  if (opdsSyncAssociated_) {
+    suspendBackgroundWork();
+    {
+      RenderLock lock(*this);
+      saveProgress(currentSpineIndex, section->currentPage, section->pageCount);
+      section.reset();
+    }
+    queueOpdsProgress();
+    globalReadingSessionTracker().end();
+    startActivityForResult(std::make_unique<OpdsProgressActivity>(renderer, mappedInput, epub->getPath(), true),
+                           [](const ActivityResult&) { activityManager.goHome(); });
+    return true;
+  }
 
   // Reader-close auto-push has no reader session left to return to once it completes.
   launchKOReaderSync(SyncLaunchMode::AUTO_PUSH, nullptr, {KOReaderSyncPostAction::Home, {}});
@@ -270,4 +307,44 @@ void EpubReaderActivity::applyPendingSyncSession() {
   sync.clear();
   APP_STATE.saveToFile();
   logReaderMemSnapshot("after_apply_pending_sync_session");
+}
+
+void EpubReaderActivity::launchOpdsProgress(const OpdsProgressSync::Remote* cached) {
+  if (!epub) return;
+  suspendBackgroundWork();
+  {
+    RenderLock lock(*this);
+    if (section) {
+      saveProgress(currentSpineIndex, section->currentPage, section->pageCount);
+      navTarget = NavigationTarget::makePage(section->currentPage);
+    }
+    section.reset();
+  }
+  startActivityForResult(std::make_unique<OpdsProgressActivity>(renderer, mappedInput, epub->getPath(), false, cached),
+                         [this](const ActivityResult& result) {
+                           if (!result.isCancelled && std::holds_alternative<OpdsProgressResult>(result.data)) {
+                             const auto& remote = std::get<OpdsProgressResult>(result.data);
+                             OpdsProgressSync::acceptRemote(epub->getPath());
+                             opdsProgressDirty_ = false;
+                             opdsSavedSpine_ = -1;
+                             // A chapter href alone is less precise than total progression. Use a resolvable
+                             // element anchor when available, otherwise retain the fractional fallback.
+                             const auto fragment = remote.reference.find('#');
+                             if (fragment != std::string::npos && fragment > 0 &&
+                                 fragment + 1 < remote.reference.size() &&
+                                 epub->resolveHrefToSpineIndex(remote.reference) >= 0)
+                               navigateToHref(remote.reference, true);
+                             else
+                               jumpToPercent(remote.progression * 100.0f);
+                           }
+                           resumeBackgroundWork();
+                           ReaderUtils::enforceExitFullRefresh(renderer);
+                           requestUpdate();
+                         });
+}
+
+void EpubReaderActivity::queueOpdsProgress() {
+  if (!epub || !opdsProgressDirty_ || opdsSpine_ < 0 || opdsSpine_ >= epub->getSpineItemsCount()) return;
+  if (OpdsProgressSync::queue(epub->getPath(), opdsProgress_, epub->getSpineItem(opdsSpine_).href, opdsReadAt_))
+    opdsProgressDirty_ = false;
 }

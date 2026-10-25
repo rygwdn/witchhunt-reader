@@ -7,7 +7,9 @@
 #include <I18n.h>
 #include <JpegToBmpConverter.h>
 #include <Logging.h>
+#include <OpdsJsonParser.h>
 #include <OpdsStream.h>
+#include <PngToBmpConverter.h>
 #include <SaxParser/SaxParser.h>
 #include <WiFi.h>
 #include <Xtc.h>
@@ -16,6 +18,7 @@
 #include <cctype>
 #include <cstdio>
 #include <memory>
+#include <new>
 
 #include "CrossPointSettings.h"
 #include "MappedInputManager.h"
@@ -28,6 +31,7 @@
 #include "components/themes/ListTouchBand.h"
 #include "fontIds.h"
 #include "network/HttpDownloader.h"
+#include "network/OpdsProgressSync.h"
 #include "util/OpdsFilename.h"
 #include "util/StringUtils.h"
 #include "util/UrlUtils.h"
@@ -53,6 +57,17 @@ int formatItemsPerPage(const Rect& contentRect) {
   const int availableHeight = rawAvailableHeight > FORMAT_ITEM_HEIGHT ? rawAvailableHeight : FORMAT_ITEM_HEIGHT;
   const int itemsPerPage = availableHeight / FORMAT_ITEM_HEIGHT;
   return itemsPerPage > 0 ? itemsPerPage : 1;
+}
+
+std::string coverCachePath(const std::string& url) {
+  uint64_t hash = 14695981039346656037ULL;
+  for (unsigned char c : url) {
+    hash ^= c;
+    hash *= 1099511628211ULL;
+  }
+  char path[80];
+  snprintf(path, sizeof(path), "/.crosspoint/opds-covers/%016llx.bmp", static_cast<unsigned long long>(hash));
+  return path;
 }
 
 void writeString(HalFile& f, const std::string& s) {
@@ -98,6 +113,13 @@ void writeEntryToCache(HalFile& f, const OpdsEntry& entry) {
   writeString(f, entry.id);
   writeString(f, entry.summary);
   writeString(f, entry.imageHref);
+  const int16_t percent = entry.progressPercent;
+  f.write(&percent, sizeof(percent));
+  writeString(f, entry.groupTitle);
+  writeString(f, entry.seriesTitle);
+  writeString(f, entry.seriesHref);
+  writeString(f, entry.progressionHref);
+  writeString(f, entry.statsHref);
   uint16_t numLinks = entry.acquisitionLinks.size();
   f.write(reinterpret_cast<const uint8_t*>(&numLinks), sizeof(numLinks));
   for (const auto& link : entry.acquisitionLinks) {
@@ -105,6 +127,8 @@ void writeEntryToCache(HalFile& f, const OpdsEntry& entry) {
     writeString(f, link.mimeType);
     writeString(f, link.formatKey);
     writeString(f, link.fileExtension);
+    writeString(f, link.progressionHref);
+    writeString(f, link.statsHref);
   }
 }
 
@@ -120,15 +144,27 @@ OpdsEntry readEntryFromCache(HalFile& f) {
   entry.id = readString(f, ok);
   entry.summary = readString(f, ok);
   entry.imageHref = readString(f, ok);
+  int16_t percent = -1;
+  if (f.read(&percent, sizeof(percent)) != sizeof(percent)) return {};
+  entry.progressPercent = percent;
+  entry.groupTitle = readString(f, ok);
+  entry.seriesTitle = readString(f, ok);
+  entry.seriesHref = readString(f, ok);
+  entry.progressionHref = readString(f, ok);
+  entry.statsHref = readString(f, ok);
   if (!ok) return {};
   uint16_t numLinks = 0;
   if (f.read(&numLinks, sizeof(numLinks)) != sizeof(numLinks)) return {};
+  if (numLinks > 16) return {};
+  entry.acquisitionLinks.reserve(numLinks);
   for (uint16_t i = 0; i < numLinks; ++i) {
     OpdsAcquisitionLink link;
     link.href = readString(f, ok);
     link.mimeType = readString(f, ok);
     link.formatKey = readString(f, ok);
     link.fileExtension = readString(f, ok);
+    link.progressionHref = readString(f, ok);
+    link.statsHref = readString(f, ok);
     if (!ok) return {};
     entry.acquisitionLinks.push_back(std::move(link));
   }
@@ -252,7 +288,8 @@ void OpdsBookBrowserActivity::onEnter() {
   {
     HalFile cacheFile;
     if (Storage.openFileForWrite("OPDS", "/.tmp_opds_cache.dat", cacheFile)) {
-      if (loadOpdsDiscovery(server.url, searchTemplate, cacheFile, entryOffsets)) {
+      if (server.url.find("/opds/v2") == std::string::npos &&
+          loadOpdsDiscovery(server.url, searchTemplate, cacheFile, entryOffsets)) {
         LOG_DBG("OPDS", "Discovery cache hit: %zu nav entries", entryOffsets.size());
         cacheFile.flush();
         cacheFile.close();
@@ -274,6 +311,7 @@ void OpdsBookBrowserActivity::onEnter() {
 
 void OpdsBookBrowserActivity::onExit() {
   Activity::onExit();
+  httpSession.reset();
 
   entryOffsets.clear();
   navigationHistory.clear();
@@ -331,6 +369,14 @@ void OpdsBookBrowserActivity::loop() {
         mappedInput.wasLogicalReleased(MappedInputManager::Direction::Right)) {
       state = BrowserState::BROWSING;
       requestUpdate();
+    } else if (mappedInput.wasLogicalReleased(MappedInputManager::Direction::Left)) {
+      const auto entry = getEntry(selectorIndex);
+      if (!entry.seriesHref.empty()) {
+        OpdsEntry series;
+        series.title = entry.seriesTitle;
+        series.href = entry.seriesHref;
+        navigateToEntry(series);
+      }
     } else if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
       const auto entry = getEntry(selectorIndex);
       state = BrowserState::BROWSING;
@@ -402,10 +448,12 @@ void OpdsBookBrowserActivity::loop() {
 
     if (!entryOffsets.empty()) {
       // Logical Left/Right are reserved for Search and Info, so restrict to logical Up/Down only.
+      const int previousPage = selectorIndex / pageItems();
       buttonNavigator.onNextList(ButtonNavigator::getStepNextButtons(), selectorIndex,
                                  static_cast<int>(entryOffsets.size()), [this] { requestUpdate(); });
       buttonNavigator.onPreviousList(ButtonNavigator::getStepPreviousButtons(), selectorIndex,
                                      static_cast<int>(entryOffsets.size()), [this] { requestUpdate(); });
+      if (selectorIndex / pageItems() != previousPage) prepareCoverPage();
     }
   }
 }
@@ -586,13 +634,18 @@ void OpdsBookBrowserActivity::render(RenderLock&&) {
       renderer.drawCenteredText(UI_10_FONT_ID, fmtY, fmtsStr.c_str());
     }
 
-    const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_DOWNLOAD), "", "");
+    const auto labels =
+        mappedInput.mapLabels(tr(STR_BACK), tr(STR_DOWNLOAD), entry.seriesHref.empty() ? "" : tr(STR_SERIES), "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
     renderer.displayBuffer();
     return;
   }
 
   // Browsing state
+  if (progressConflict) {
+    auto warning = renderer.truncatedText(UI_10_FONT_ID, tr(STR_OPDS_PROGRESS_CONFLICT), contentRect.width - 8);
+    renderer.drawText(UI_10_FONT_ID, contentRect.x + 4, 36, warning.c_str());
+  }
   // Show appropriate button hint based on selected entry type.
   // Read the selected entry once so its type drives both button labels.
   const bool selectedIsBook = !entryOffsets.empty() && getEntry(selectorIndex).type == OpdsEntryType::BOOK;
@@ -612,36 +665,90 @@ void OpdsBookBrowserActivity::render(RenderLock&&) {
     return;
   }
 
-  const auto pageStartIndex = selectorIndex / PAGE_ITEMS * PAGE_ITEMS;
-  // Entry rows published for touch. The y here is a bare 60, NOT contentRect.y + 60 as the
-  // chapter selectors use — matched to the fill below rather than "corrected", because the fill
-  // is where the row visibly is.
-  ListTouchBand::recordUniformRows(contentRect.x, contentRect.width - 1, 60 - 2, 30, pageStartIndex,
-                                   std::min<int>(PAGE_ITEMS, static_cast<int>(entryOffsets.size()) - pageStartIndex));
-  renderer.fillRect(contentRect.x, 60 + (selectorIndex % PAGE_ITEMS) * 30 - 2, contentRect.width - 1, 30);
-
-  for (size_t i = pageStartIndex; i < entryOffsets.size() && i < static_cast<size_t>(pageStartIndex + PAGE_ITEMS);
-       i++) {
+  const int rows = pageItems();
+  const int rowHeight = jsonFeed ? 112 : 30;
+  const int pageStartIndex = selectorIndex / rows * rows;
+  ListTouchBand::recordUniformRows(contentRect.x, contentRect.width - 1, 58, rowHeight, pageStartIndex,
+                                   std::min<int>(rows, static_cast<int>(entryOffsets.size()) - pageStartIndex));
+  for (size_t i = pageStartIndex; i < entryOffsets.size() && i < static_cast<size_t>(pageStartIndex + rows); ++i) {
     const auto entry = getEntry(i);
-
-    // Format display text with type indicator
-    std::string displayText;
-    if (entry.type == OpdsEntryType::NAVIGATION) {
-      displayText = "> " + entry.title;  // Folder/navigation indicator
-    } else {
-      // Book: "Title - Author" or just "Title"
-      displayText = entry.title;
-      if (!entry.author.empty()) {
-        displayText += " - " + entry.author;
-      }
+    const int y = 60 + (i - pageStartIndex) * rowHeight;
+    const bool selected = i == static_cast<size_t>(selectorIndex);
+    if (!jsonFeed) {
+      if (selected) renderer.fillRect(contentRect.x, y - 2, contentRect.width - 1, rowHeight);
+      auto text = entry.type == OpdsEntryType::NAVIGATION ? "> " + entry.title : entry.title + " - " + entry.author;
+      auto title = renderer.truncatedText(UI_10_FONT_ID, text.c_str(), contentRect.width - 40);
+      renderer.drawText(UI_10_FONT_ID, contentRect.x + 20, y, title.c_str(), !selected);
+      continue;
     }
-
-    auto item = renderer.truncatedText(UI_10_FONT_ID, displayText.c_str(), contentRect.width - 40);
-    renderer.drawText(UI_10_FONT_ID, contentRect.x + 20, 60 + (i % PAGE_ITEMS) * 30, item.c_str(),
-                      i != static_cast<size_t>(selectorIndex));
+    if (selected) renderer.drawRect(contentRect.x, y - 2, contentRect.width - 1, rowHeight - 3);
+    int textX = contentRect.x + 12;
+    if (entry.type == OpdsEntryType::BOOK) {
+      FsFile cover;
+      if (Storage.openFileForRead("OPDS", coverCachePath(entry.imageHref).c_str(), cover)) {
+        Bitmap bitmap(cover);
+        if (bitmap.parseHeaders() == BmpReaderError::Ok) renderer.drawBitmap(bitmap, textX, y + 4, 64, 96);
+        cover.close();
+      }
+      textX += 76;
+    }
+    const int width = contentRect.x + contentRect.width - textX - 12;
+    if (!entry.groupTitle.empty()) {
+      auto group = renderer.truncatedText(UI_10_FONT_ID, entry.groupTitle.c_str(), width);
+      renderer.drawText(UI_10_FONT_ID, textX, y + 2, group.c_str());
+    }
+    auto title = renderer.truncatedText(UI_12_FONT_ID, entry.title.c_str(), width, EpdFontFamily::BOLD);
+    renderer.drawText(UI_12_FONT_ID, textX, y + 25, title.c_str(), true, EpdFontFamily::BOLD);
+    std::string authorText = entry.author;
+    if (entry.progressPercent >= 0) {
+      char percent[16];
+      snprintf(percent, sizeof(percent), "  %d%%", entry.progressPercent);
+      authorText += percent;
+    }
+    auto author = renderer.truncatedText(UI_10_FONT_ID, authorText.c_str(), width);
+    renderer.drawText(UI_10_FONT_ID, textX, y + 53, author.c_str());
+    auto series = renderer.truncatedText(UI_10_FONT_ID, entry.seriesTitle.c_str(), width);
+    renderer.drawText(UI_10_FONT_ID, textX, y + 77, series.c_str());
   }
 
   renderer.displayBuffer();
+}
+
+int OpdsBookBrowserActivity::pageItems() const {
+  return jsonFeed ? std::max(1, (renderer.getScreenHeight() - 120) / 112) : PAGE_ITEMS;
+}
+
+void OpdsBookBrowserActivity::prepareCoverPage() {
+  if (!jsonFeed || WiFi.status() != WL_CONNECTED || entryOffsets.empty()) return;
+  Storage.mkdir("/.crosspoint/opds-covers");
+  if (!httpSession) httpSession = std::make_unique<HttpDownloader::Session>();
+  const int rows = pageItems();
+  const int start = selectorIndex / rows * rows;
+  for (int i = start; i < static_cast<int>(entryOffsets.size()) && i < start + rows; ++i) {
+    const auto entry = getEntry(i);
+    if (entry.imageHref.empty()) continue;
+    const auto destination = coverCachePath(entry.imageHref);
+    if (Storage.exists(destination.c_str())) continue;
+    const bool sameOrigin = UrlUtils::extractHost(entry.imageHref) == UrlUtils::extractHost(server.url);
+    if (HttpDownloader::downloadToFile(*httpSession, entry.imageHref, "/.tmp_opds_thumb.jpg", nullptr,
+                                       sameOrigin ? server.username : "",
+                                       sameOrigin ? server.password : "") != HttpDownloader::OK)
+      continue;
+    HalFile source, target;
+    if (Storage.openFileForRead("OPDS", "/.tmp_opds_thumb.jpg", source) &&
+        Storage.openFileForWrite("OPDS", destination, target)) {
+      uint8_t magic = 0;
+      source.read(&magic, 1);
+      source.seek(0);
+      const bool converted = magic == 0x89
+                                 ? PngToBmpConverter::pngFileTo1BitBmpStreamWithSize(source, target, 64, 96)
+                                 : JpegToBmpConverter::jpegFileTo1BitBmpStreamWithSize(source, target, 64, 96);
+      source.close();
+      target.close();
+      if (!converted) Storage.remove(destination.c_str());
+    }
+    Storage.remove("/.tmp_opds_thumb.jpg");
+  }
 }
 
 void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
@@ -659,6 +766,8 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
     memoryTrimmed = true;
   }
 
+  progressConflict = OpdsProgressSync::flush(server);
+  if (!httpSession) httpSession = std::make_unique<HttpDownloader::Session>();
   entryOffsets.clear();
   // Reserve up front so the per-entry push_back loop doesn't repeatedly realloc
   // (2x grow + copy) and fragment the heap mid-fetch. One page-ish worth covers
@@ -684,7 +793,18 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
     return;
   }
 
-  parser.onEntryParsed = [&](const OpdsEntry& entry) {
+  auto onEntry = [&](OpdsEntry entry) {
+    if (!entry.href.empty()) entry.href = UrlUtils::buildUrl(url, entry.href);
+    if (!entry.imageHref.empty()) entry.imageHref = UrlUtils::buildUrl(url, entry.imageHref);
+    if (!entry.seriesHref.empty()) entry.seriesHref = UrlUtils::buildUrl(url, entry.seriesHref);
+    if (!entry.progressionHref.empty()) entry.progressionHref = UrlUtils::buildUrl(url, entry.progressionHref);
+    if (!entry.statsHref.empty()) entry.statsHref = UrlUtils::buildUrl(url, entry.statsHref);
+    for (auto& acquisition : entry.acquisitionLinks) {
+      acquisition.href = UrlUtils::buildUrl(url, acquisition.href);
+      if (!acquisition.progressionHref.empty())
+        acquisition.progressionHref = UrlUtils::buildUrl(url, acquisition.progressionHref);
+      if (!acquisition.statsHref.empty()) acquisition.statsHref = UrlUtils::buildUrl(url, acquisition.statsHref);
+    }
     if (entryOffsets.size() >= MAX_FEED_ENTRIES) {
       if (!feedCapped) {
         feedCapped = true;
@@ -695,14 +815,42 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
     uint32_t offset = cacheFile.position();
     entryOffsets.push_back(offset);
     writeEntryToCache(cacheFile, entry);
-    if (isRootFeed && entry.type == OpdsEntryType::NAVIGATION) {
+    if (isRootFeed && !jsonFeed && entry.type == OpdsEntryType::NAVIGATION) {
       capturedNavEntries.push_back({entry.title, entry.href});
     }
   };
 
+  parser.onEntryParsed = onEntry;
+  // The JSON parser owns a fixed-depth path stack; keep it off the reader task's small stack.
+  std::unique_ptr<OpdsJsonParser> json;
+  bool detected = false;
+  jsonFeed = false;
   {
-    OpdsParserStream stream{parser};
-    if (!HttpDownloader::fetchUrl(url, stream, server.username, server.password)) {
+    const HttpDownloader::DataCallback consume = [&](const uint8_t* data, size_t length) {
+      if (!detected) {
+        size_t i = 0;
+        while (i < length && isspace(data[i])) ++i;
+        if (i == length) return true;
+        detected = true;
+        jsonFeed = data[i] == '{';
+        if (jsonFeed) {
+          json.reset(new (std::nothrow) OpdsJsonParser());
+          if (!json) {
+            LOG_ERR("OPDS", "No memory for JSON feed parser");
+            return false;
+          }
+          json->onEntryParsed = onEntry;
+        }
+      }
+      if (json)
+        json->feed(data, length);
+      else
+        parser.write(data, length);
+      return true;
+    };
+    const bool sameOrigin = UrlUtils::extractHost(url) == UrlUtils::extractHost(server.url);
+    if (!HttpDownloader::fetchUrl(*httpSession, url, consume, sameOrigin ? server.username : "",
+                                  sameOrigin ? server.password : "")) {
       state = BrowserState::ERROR;
       errorMessage = tr(STR_FETCH_FEED_FAILED);
       requestUpdate();
@@ -710,7 +858,8 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
     }
   }
 
-  if (!parser) {
+  parser.flush();
+  if (!detected || (json ? !json->finish() : !parser)) {
     state = BrowserState::ERROR;
     errorMessage = tr(STR_PARSE_FEED_FAILED);
     requestUpdate();
@@ -724,7 +873,7 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
     LOG_ERR("OPDS", "Feed parse truncated some fields (flags=0x%lx)", static_cast<unsigned long>(trunc));
   }
 
-  searchTemplate = parser.getSearchTemplate();
+  searchTemplate = json ? json->getSearchTemplate() : parser.getSearchTemplate();
   if (searchTemplate.empty() && !parser.getOsdUrl().empty()) {
     fetchOsdTemplate(UrlUtils::buildUrl(url, parser.getOsdUrl()));
   } else if (!initialQuery_.empty() && !searchTemplate.empty()) {
@@ -732,12 +881,12 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
     initialQuery_.clear();
   }
 
-  if (isRootFeed) {
+  if (isRootFeed && !jsonFeed) {
     saveOpdsDiscovery(server.url, searchTemplate, capturedNavEntries);
   }
 
-  const auto& nextUrl = parser.getNextPageUrl();
-  const auto& prevUrl = parser.getPrevPageUrl();
+  const auto& nextUrl = json ? json->getNextPageUrl() : parser.getNextPageUrl();
+  const auto& prevUrl = json ? json->getPrevPageUrl() : parser.getPrevPageUrl();
 
   if (!prevUrl.empty()) {
     std::string resolvedPrevUrl = UrlUtils::buildUrl(url, prevUrl);
@@ -752,7 +901,10 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
     writeEntryToCache(cacheFile, nextEntry);
   }
 
+  cacheFile.flush();
+  cacheFile.close();
   selectorIndex = 0;
+  prepareCoverPage();
   state = entryOffsets.empty() ? BrowserState::ERROR : BrowserState::BROWSING;
   if (entryOffsets.empty()) errorMessage = tr(STR_NO_ENTRIES);
   requestUpdate();
@@ -833,8 +985,10 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book, const OpdsAcqu
   LOG_DBG("OPDS", "Downloading: %s -> %s", downloadUrl.c_str(), filename.c_str());
 
   uint32_t lastProgressUpdateMs = 0;
+  if (!httpSession) httpSession = std::make_unique<HttpDownloader::Session>();
+  const bool sameDownloadOrigin = UrlUtils::extractHost(downloadUrl) == UrlUtils::extractHost(server.url);
   const auto result = HttpDownloader::downloadToFile(
-      downloadUrl, filename,
+      *httpSession, downloadUrl, filename,
       [this, &lastProgressUpdateMs](const unsigned int downloaded, const unsigned int total) {
         mappedInput.update();
         downloadProgress = downloaded;
@@ -846,7 +1000,7 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book, const OpdsAcqu
         }
         return !mappedInput.wasPressed(MappedInputManager::Button::Back);
       },
-      server.username, server.password);
+      sameDownloadOrigin ? server.username : "", sameDownloadOrigin ? server.password : "");
 
   if (result == HttpDownloader::OK) {
     FsFile downloadedFile;
@@ -864,6 +1018,12 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book, const OpdsAcqu
     downloadedFile.close();
 
     LOG_DBG("OPDS", "Download complete: %s", filename.c_str());
+    const auto& progressHref = acquisition.progressionHref.empty() ? book.progressionHref : acquisition.progressionHref;
+    const auto& statsHref = acquisition.statsHref.empty() ? book.statsHref : acquisition.statsHref;
+    if (!progressHref.empty() || !statsHref.empty())
+      OpdsProgressSync::associate(filename, server,
+                                  progressHref.empty() ? "" : UrlUtils::buildUrl(server.url, progressHref),
+                                  statsHref.empty() ? "" : UrlUtils::buildUrl(server.url, statsHref));
 
     // Clear any existing cache for this book just in case it's a redownload of
     // a previously opened book.
@@ -895,8 +1055,9 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book, const OpdsAcqu
         requestUpdate(true);
 
         uint32_t lastCoverProgressMs = 0;
+        const bool sameCoverOrigin = UrlUtils::extractHost(coverUrl) == UrlUtils::extractHost(server.url);
         const auto coverDlResult = HttpDownloader::downloadToFile(
-            coverUrl, sidecarPath,
+            *httpSession, coverUrl, sidecarPath,
             [this, &lastCoverProgressMs](const unsigned int downloaded, const unsigned int total) {
               mappedInput.update();
               downloadProgress = downloaded;
@@ -908,7 +1069,7 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book, const OpdsAcqu
               }
               return !mappedInput.wasPressed(MappedInputManager::Button::Back);
             },
-            server.username, server.password);
+            sameCoverOrigin ? server.username : "", sameCoverOrigin ? server.password : "");
         if (coverDlResult != HttpDownloader::OK) {
           LOG_ERR("OPDS", "Failed to download cover from %s (err %d)", coverUrl.c_str(), (int)coverDlResult);
           Storage.remove(sidecarPath.c_str());
@@ -1009,8 +1170,11 @@ void OpdsBookBrowserActivity::fetchCoverForEntry(const OpdsEntry& entry) {
       (entry.imageHref.rfind("http", 0) == 0) ? entry.imageHref : UrlUtils::buildUrl(server.url, entry.imageHref);
   LOG_DBG("OPDS", "Fetching cover: %s", coverUrl.c_str());
 
-  if (HttpDownloader::downloadToFile(coverUrl, "/.tmp_opds_cover.jpg", nullptr, server.username, server.password) !=
-      HttpDownloader::OK) {
+  if (!httpSession) httpSession = std::make_unique<HttpDownloader::Session>();
+  const bool sameOrigin = UrlUtils::extractHost(coverUrl) == UrlUtils::extractHost(server.url);
+  if (HttpDownloader::downloadToFile(*httpSession, coverUrl, "/.tmp_opds_cover.jpg", nullptr,
+                                     sameOrigin ? server.username : "",
+                                     sameOrigin ? server.password : "") != HttpDownloader::OK) {
     LOG_DBG("OPDS", "Cover download failed");
     return;
   }
@@ -1026,7 +1190,11 @@ void OpdsBookBrowserActivity::fetchCoverForEntry(const OpdsEntry& entry) {
     return;
   }
 
-  const bool ok = JpegToBmpConverter::jpegFileToBmpStreamWithSize(src, dst, coverMaxW, coverMaxH);
+  uint8_t magic = 0;
+  src.read(&magic, 1);
+  src.seek(0);
+  const bool ok = magic == 0x89 ? PngToBmpConverter::pngFileToBmpStreamWithSize(src, dst, coverMaxW, coverMaxH)
+                                : JpegToBmpConverter::jpegFileToBmpStreamWithSize(src, dst, coverMaxW, coverMaxH);
   src.close();
   dst.close();
   Storage.remove("/.tmp_opds_cover.jpg");
@@ -1063,6 +1231,10 @@ void OpdsBookBrowserActivity::performSearch(const std::string& query) {
   };
 
   std::string url = searchTemplate;
+  const size_t optionalQuery = url.find("{?query}");
+  if (optionalQuery != std::string::npos) url.replace(optionalQuery, 8, "?query=" + urlEncode(query));
+  const size_t queryToken = url.find("{query}");
+  if (queryToken != std::string::npos) url.replace(queryToken, 7, urlEncode(query));
   const std::string placeholder = "{searchTerms}";
   const size_t pos = url.find(placeholder);
   if (pos != std::string::npos) url.replace(pos, placeholder.length(), urlEncode(query));

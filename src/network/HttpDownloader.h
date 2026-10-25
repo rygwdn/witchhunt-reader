@@ -87,6 +87,9 @@ class HttpDownloader {
   static bool fetchUrl(const std::string& url, Stream& stream, const std::string& username = "",
                        const std::string& password = "", TlsPolicy tls = TlsPolicy::Verified);
 
+  static bool fetchUrl(Session& session, const std::string& url, const DataCallback& onData,
+                       const std::string& username = "", const std::string& password = "");
+
   static bool fetchUrl(const std::string& url, const DataCallback& onData, const std::string& username = "",
                        const std::string& password = "");
 

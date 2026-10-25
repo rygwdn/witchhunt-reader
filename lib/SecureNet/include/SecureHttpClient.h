@@ -46,6 +46,7 @@ class SecureHttpClient {
   void setAllowInsecureFallback(bool allow) { _allowInsecureFallback = allow; }
   // See SecureClient::setAllowCertificateDateErrors().
   void setAllowCertificateDateErrors(bool allow) { _allowCertificateDateErrors = allow; }
+  void setMaxResponseBodySize(size_t bytes) { _maxResponseBodySize = bytes; }
   void setTimeout(uint32_t ms) { _timeoutMs = ms; }
   void setUserAgent(const std::string& ua) { _userAgent = ua; }
   void setBasicAuth(const std::string& user, const std::string& pass) {
@@ -187,6 +188,7 @@ class SecureHttpClient {
   bool _allowRedirectDowngrade = false;
 
   // per-request result
+  size_t _maxResponseBodySize = SIZE_MAX;
   std::string _body;
   int _status = 0;
   bool _lastInsecure = false;

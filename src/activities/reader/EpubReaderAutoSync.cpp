@@ -12,6 +12,7 @@
 #include "KOReaderCredentialStore.h"
 #include "KOReaderDocumentId.h"
 #include "activities/ActivityManager.h"
+#include "network/OpdsSyncPolicy.h"
 
 namespace {
 constexpr float SAME_PROGRESS_EPSILON = 0.001f;
@@ -32,6 +33,10 @@ bool EpubReaderActivity::autoSyncReaderIsQuiet() const {
 }
 
 KOReaderPosition EpubReaderActivity::currentKoPosition(const int page, const int pageCount) const {
+  if (opdsSyncAssociated_) {
+    return {epub->getSpineItem(currentSpineIndex).href,
+            epub->calculateProgress(currentSpineIndex, pageCount > 0 ? static_cast<float>(page) / pageCount : 0)};
+  }
   CrossPointPosition pos{};
   pos.spineIndex = currentSpineIndex;
   pos.pageNumber = page;
@@ -49,7 +54,7 @@ KOReaderPosition EpubReaderActivity::currentKoPosition(const int page, const int
 }
 
 void EpubReaderActivity::maybeAutoPullOnWake() {
-  if (!KOReaderAutoSync::pullEnabled()) {
+  if (!KOReaderAutoSync::pullEnabled(opdsSyncAssociated_)) {
     autoSyncPullPending = false;
     return;
   }
@@ -61,6 +66,13 @@ void EpubReaderActivity::maybeAutoPullOnWake() {
   }
 
   const std::string path = epub->getPath();
+  if (opdsSyncAssociated_) {
+    KOReaderSyncJob job;
+    job.opds = true;
+    job.path = path;
+    if (KOReaderSyncWorker::post(std::move(job), &autoSyncPullSeq)) autoSyncPullPending = false;
+    return;
+  }
   const DocumentMatchMethod method = KOReaderAutoSync::effectiveMatchMethod(path);
   std::string primaryHash = hashFor(path, method);
   if (primaryHash.empty()) {
@@ -111,6 +123,31 @@ void EpubReaderActivity::evaluateAutoSyncPull() {
   autoSyncPullDialogLaunched = false;
   KOReaderSyncJob job = std::exchange(autoSyncPullJob, {});
 
+  if (job.opds) {
+    if (job.result == KOReaderSyncClient::NOT_FOUND) {
+      silentUploadCurrentPosition();
+      return;
+    }
+    if (job.result != KOReaderSyncClient::OK) {
+      AUTOSYNC_STATE.markSyncFailed();
+      return;
+    }
+    const int total = section->estimatedTotalPages();
+    const float local = currentKoPosition(section->currentPage, total).percentage;
+    const float pageEnd =
+        total > 0 ? epub->calculateProgress(currentSpineIndex, static_cast<float>(section->currentPage + 1) / total)
+                  : local;
+    if (OpdsSyncPolicy::sameReadingPage(local, pageEnd, job.remote.percentage, SAME_PROGRESS_EPSILON)) {
+      AUTOSYNC_STATE.markSynced(epub->getPath(), currentSpineIndex, section->currentPage);
+    } else if (!opdsProgressDirty_) {
+      // OPDS is timestamp-based. Never use KOReader's furthest-wins rule for rereads.
+      const OpdsProgressSync::Remote remote{job.remote.percentage, job.primaryHash, job.remote.device,
+                                            job.remote.progress};
+      launchOpdsProgress(&remote);
+      autoSyncPullDialogLaunched = true;
+    }
+    return;
+  }
   const bool smart = KOREADER_STORE.getSyncBehavior() == KOReaderSyncBehavior::SMART;
   const std::string path = epub->getPath();
 
@@ -186,6 +223,8 @@ void EpubReaderActivity::silentUploadCurrentPosition() {
   if (page < 0 || total <= 0) {
     return;
   }
+  queueOpdsProgress();
+  if (opdsSyncAssociated_ && opdsProgressDirty_) return;
   const KOReaderPosition local = currentKoPosition(page, total);
   autoSyncPushSeq = KOReaderAutoSync::pushSilentAsync(epub->getPath(), local, currentSpineIndex, page, epub->getTitle(),
                                                       epub->getAuthor());
@@ -232,7 +271,7 @@ void EpubReaderActivity::maybeAutoPushInterval() {
   if (activityManager.inSleepTransition()) {
     return;
   }
-  if (!KOReaderAutoSync::intervalPushEnabled() || !autoSyncReaderIsQuiet()) {
+  if (!KOReaderAutoSync::intervalPushEnabled(opdsSyncAssociated_) || !autoSyncReaderIsQuiet()) {
     return;
   }
   if (!AUTOSYNC_STATE.lastNoteWasTurn()) {
@@ -252,6 +291,8 @@ void EpubReaderActivity::maybeAutoPushInterval() {
   if (page < 0 || total <= 0) {
     return;
   }
+  queueOpdsProgress();
+  if (opdsSyncAssociated_ && opdsProgressDirty_) return;
   const KOReaderPosition local = currentKoPosition(page, total);
   autoSyncLastPushAt = millis();
   autoSyncPushSeq = KOReaderAutoSync::pushSilentAsync(epub->getPath(), local, currentSpineIndex, page, epub->getTitle(),
@@ -296,7 +337,7 @@ void EpubReaderActivity::serviceAutoSync() {
   }
 
   if (epub != nullptr && section != nullptr) {
-    AUTOSYNC_STATE.noteProgress(epub->getPath(), currentSpineIndex, section->currentPage);
+    AUTOSYNC_STATE.noteProgress(epub->getPath(), currentSpineIndex, section->currentPage, opdsSyncAssociated_);
   }
   maybeAutoPushInterval();
 }
@@ -316,11 +357,12 @@ void EpubReaderActivity::releaseAutoSyncSlot() {
 
 void EpubReaderActivity::maybeAutoPushOnSleep() {
   if (epub != nullptr && section != nullptr) {
-    AUTOSYNC_STATE.noteProgress(epub->getPath(), currentSpineIndex, section->currentPage);
+    AUTOSYNC_STATE.noteProgress(epub->getPath(), currentSpineIndex, section->currentPage, opdsSyncAssociated_);
   }
   AUTOSYNC_STATE.flush();
 
-  if (!activityManager.inSleepTransition() || !KOReaderAutoSync::sleepPushEnabled() || !AUTOSYNC_STATE.isPending()) {
+  if (!activityManager.inSleepTransition() || !KOReaderAutoSync::sleepPushEnabled(opdsSyncAssociated_) ||
+      (!opdsSyncAssociated_ && !AUTOSYNC_STATE.isPending())) {
     return;
   }
   if (footnoteDepth > 0) {
@@ -337,6 +379,8 @@ void EpubReaderActivity::maybeAutoPushOnSleep() {
   }
 
   saveProgress(currentSpineIndex, page, total);
+  queueOpdsProgress();
+  if (opdsSyncAssociated_ && opdsProgressDirty_) return;
   const KOReaderPosition local = currentKoPosition(page, total);
   KOReaderAutoSync::stashSleepPush(epub->getPath(), local, currentSpineIndex, page, epub->getTitle(),
                                    epub->getAuthor());

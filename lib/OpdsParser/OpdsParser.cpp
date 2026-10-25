@@ -31,7 +31,7 @@ OpdsAcquisitionLink supportedAcquisitionLink(const char* type, const char* href)
 
   if (strcmp(type, "application/epub+zip") == 0) {
     if (FsHelpers::checkFileExtension(trimmedHref, ".kepub.epub")) {
-      return {href, type, "kepub", ".kepub.epub"};
+      return {href, type, "kepub", ".kepub.epub", {}, {}};
     }
 
     // Calibre-Web-Automated uses trailing path segments like `/kepub/` instead of
@@ -39,25 +39,25 @@ OpdsAcquisitionLink supportedAcquisitionLink(const char* type, const char* href)
     if (FsHelpers::checkFileExtension(trimmedHref, ".kepub") || FsHelpers::checkFileExtension(trimmedHref, "/kepub")) {
       // Save bare KePub downloads with an `.epub` suffix so the existing ePub
       // reader can open them.
-      return {href, type, "kepub", ".kepub.epub"};
+      return {href, type, "kepub", ".kepub.epub", {}, {}};
     }
-    return {href, type, "epub", ".epub"};
+    return {href, type, "epub", ".epub", {}, {}};
   }
 
   if (strcmp(type, "text/plain") == 0) {
-    return {href, type, "txt", ".txt"};
+    return {href, type, "txt", ".txt", {}, {}};
   }
 
   if (strcmp(type, "text/markdown") == 0 || strcmp(type, "text/x-markdown") == 0) {
-    return {href, type, "md", ".md"};
+    return {href, type, "md", ".md", {}, {}};
   }
 
   if (FsHelpers::checkFileExtension(trimmedHref, ".xtc")) {
-    return {href, "application/vnd.xteink.xtc", "xtc", ".xtc"};
+    return {href, "application/vnd.xteink.xtc", "xtc", ".xtc", {}, {}};
   }
 
   if (FsHelpers::checkFileExtension(trimmedHref, ".xth") || FsHelpers::checkFileExtension(trimmedHref, ".xtch")) {
-    return {href, "application/vnd.xteink.xtch", "xtch", ".xtch"};
+    return {href, "application/vnd.xteink.xtch", "xtch", ".xtch", {}, {}};
   }
 
   return {};
@@ -146,7 +146,12 @@ void OpdsParser::startElement(void* userData, const char* name, const char** att
       }
 
       if (self->inEntry) {
-        if (rel && strstr(rel, "opds-spec.org/acquisition") != nullptr) {
+        if (rel && strcmp(rel, "http://opds-spec.org/progression") == 0) {
+          self->currentEntry.progressionHref = href;
+        } else if (rel && strcmp(rel, "https://bookorbit.app/rel/reading-stats") == 0 && type &&
+                   strcmp(type, "application/vnd.bookorbit.reading-stats+json") == 0) {
+          self->currentEntry.statsHref = href;
+        } else if (rel && strstr(rel, "opds-spec.org/acquisition") != nullptr) {
           const auto acquisition = supportedAcquisitionLink(type, href);
           if (!acquisition.formatKey.empty() && !hasEquivalentAcquisitionLink(self->currentEntry, acquisition)) {
             self->currentEntry.type = OpdsEntryType::BOOK;

@@ -108,6 +108,7 @@ class FinishedBookActivity : public Activity {
   bool nextBookAvailable_ = false;
   bool nextBookMetadataLoaded_ = false;
   bool koReaderSyncAvailable_ = false;
+  bool opdsSyncAvailable_ = false;
   bool moveFinishedBooksToCompleted_ = false;
   bool removeFinishedBooksFromRecents_ = false;
   bool syncFinishedBookToKOReader_ = false;

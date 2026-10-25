@@ -258,3 +258,16 @@ TEST(OpdsParser, SlashVariantHrefAcquisitionLinksAreDeduplicated) {
   ASSERT_EQ(links[0].formatKey, "epub");
   ASSERT_EQ(links[0].href, "/books/example.epub");
 }
+
+TEST(OpdsParser, DiscoversAdvertisedStatsLink) {
+  const std::string xml =
+      R"(<feed xmlns="http://www.w3.org/2005/Atom"><entry><title>Book</title><id>7</id><link rel="https://bookorbit.app/rel/reading-stats" type="application/vnd.bookorbit.reading-stats+json" href="/stats"/><link rel="http://opds-spec.org/acquisition" type="application/epub+zip" href="/book.epub"/></entry></feed>)";
+  OpdsParser parser;
+  std::vector<OpdsEntry> entries;
+  parser.onEntryParsed = [&](OpdsEntry entry) { entries.push_back(std::move(entry)); };
+  parser.write(reinterpret_cast<const uint8_t*>(xml.data()), xml.size());
+  parser.flush();
+  ASSERT_FALSE(parser.error());
+  ASSERT_EQ(entries.size(), 1u);
+  EXPECT_EQ(entries[0].statsHref, "/stats");
+}

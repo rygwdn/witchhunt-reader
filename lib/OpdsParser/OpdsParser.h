@@ -19,6 +19,8 @@ struct OpdsAcquisitionLink {
   std::string mimeType;
   std::string formatKey;
   std::string fileExtension;
+  std::string progressionHref;
+  std::string statsHref;
 };
 
 /**
@@ -33,6 +35,12 @@ struct OpdsEntry {
   std::string summary;  // Short description from <summary> or <content>, books only
   std::vector<OpdsAcquisitionLink> acquisitionLinks;
   std::string imageHref;  // Cover image URL (rel="http://opds-spec.org/image"), books only
+  int progressPercent = -1;
+  std::string groupTitle;
+  std::string seriesTitle;
+  std::string seriesHref;
+  std::string progressionHref;
+  std::string statsHref;
 };
 
 // Legacy alias for backward compatibility

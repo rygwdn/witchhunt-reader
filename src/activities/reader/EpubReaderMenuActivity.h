@@ -29,6 +29,7 @@ class EpubReaderMenuActivity final : public TabbedUiListActivity {
     SCREENSHOT,
     DISPLAY_QR,
     GO_HOME,
+    OPDS_PROGRESS,
     PULL_REMOTE,
     PUSH_LOCAL,
     STARRED_PAGES,
@@ -51,7 +52,8 @@ class EpubReaderMenuActivity final : public TabbedUiListActivity {
                                   const int8_t initialTextAntiAliasingOverride, const int8_t initialHyphenationOverride,
                                   const int8_t initialFontSizeNormalizationOverride,
                                   const int8_t initialInlineFootnotePreviewsOverride, const bool hasStarredPages,
-                                  const bool isCurrentPageStarred, const bool hasPrintedPages);
+                                  const bool isCurrentPageStarred, const bool hasPrintedPages,
+                                  const bool hasOpdsProgression = false);
 
   void onEnter() override;
   void onExit() override;
@@ -67,6 +69,7 @@ class EpubReaderMenuActivity final : public TabbedUiListActivity {
   [[nodiscard]] const std::vector<SettingInfo>& activeMenuItems() const { return tabMenuItems[activeTabIndex()]; }
 
   bool currentPageStarred = false;
+  bool hasOpdsProgression = false;
   void finishWithAction(MenuAction action);
 
   // UiListActivity / TabbedUiListActivity overrides

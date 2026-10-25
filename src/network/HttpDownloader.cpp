@@ -221,9 +221,7 @@ HttpDownloader::DownloadError runGetSecureOnSession(HttpDownloader::Session& ses
   impl->http->setAllowInsecureFallback(false);
   impl->http->setAllowCertificateDateErrors(!clockReady);
   impl->http->clearHeaders();
-  if (!username.empty() && !password.empty()) {
-    impl->http->setBasicAuth(username, password);
-  }
+  impl->http->setBasicAuth(username, password);
 
   auto bodySink = [&](const uint8_t* data, size_t len) -> bool {
     if (!sink.write(data, len)) return false;
@@ -253,6 +251,13 @@ HttpDownloader::DownloadError runGetOnSession(HttpDownloader::Session& session, 
   return runGetSecureOnSession(session, url, username, password, sink, tls);
 }
 }  // namespace
+
+bool HttpDownloader::fetchUrl(Session& session, const std::string& url, const DataCallback& onData,
+                              const std::string& username, const std::string& password) {
+  Sink sink;
+  sink.write = onData;
+  return runGetOnSession(session, url, username, password, sink, TlsPolicy::Verified) == OK;
+}
 
 bool HttpDownloader::fetchUrl(const std::string& url, Stream& outContent, const std::string& username,
                               const std::string& password, TlsPolicy tls) {

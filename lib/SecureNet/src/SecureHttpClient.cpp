@@ -372,6 +372,7 @@ int SecureHttpClient::get(const std::string& url, const BodySink& sink, const Pr
 int SecureHttpClient::request(const char* method, const std::string& url, const std::string& body) {
   _body.clear();
   auto sink = [this](const uint8_t* d, size_t n) {
+    if (n > _maxResponseBodySize - _body.size()) return false;
     _body.append(reinterpret_cast<const char*>(d), n);
     return true;
   };

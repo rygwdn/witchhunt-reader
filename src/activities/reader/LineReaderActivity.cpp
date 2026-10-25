@@ -13,6 +13,7 @@
 #include "ReadingSessionTracker.h"
 #include "RecentBooksStore.h"
 #include "components/UITheme.h"
+#include "network/OpdsProgressSync.h"
 
 void LineReaderActivity::onEnter() {
   Activity::onEnter();
@@ -42,7 +43,7 @@ void LineReaderActivity::onEnter() {
 
   // Start reading-stats session. Same filename-hash policy as EPUB so renamed
   // files start fresh; author is unknown for plain text formats.
-  globalReadingSessionTracker().begin(KOReaderDocumentId::calculateFromFilename(filePath), fileName, "");
+  globalReadingSessionTracker().begin(KOReaderDocumentId::calculateFromFilename(filePath), fileName, "", filePath);
 
   // Trigger first update
   requestUpdate();
@@ -74,6 +75,7 @@ void LineReaderActivity::onExit() {
   APP_STATE.readerActivityLoadCount = 0;
   APP_STATE.saveToFile();
   UITheme::getInstance().getMutableTheme().onBookWillClose(txt ? txt->getPath() : "", nullptr, nullptr, txt.get());
+  if (txt && opdsReadAt_ > 0) OpdsProgressSync::queue(txt->getPath(), opdsProgress_, "", opdsReadAt_);
   txt.reset();
 }
 
@@ -296,6 +298,9 @@ void LineReaderActivity::saveProgress() const {
     f.write(data, 7);
     f.close();
     globalReadingSessionTracker().updateProgress(percent);
+    if (opdsLastPage_ >= 0 && opdsLastPage_ != currentPage) opdsReadAt_ = OpdsProgressSync::nowMilliseconds();
+    opdsLastPage_ = currentPage;
+    opdsProgress_ = totalPages > 0 ? static_cast<float>(currentPage + 1) / totalPages : 0;
   }
 }
 

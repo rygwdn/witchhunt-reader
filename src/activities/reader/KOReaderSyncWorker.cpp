@@ -18,6 +18,7 @@
 #include "WifiCredentialStore.h"
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
+#include "network/OpdsProgressSync.h"
 
 namespace {
 constexpr unsigned long AUTO_CONNECT_TIMEOUT_MS = 10000;
@@ -122,17 +123,34 @@ void runJob(KOReaderSyncJob& job) {
 
   HalClock::ensureUsableForTls(SETTINGS.ntpServer);
 
-  switch (job.kind) {
-    case KOReaderSyncJob::FETCH_PROGRESS:
-      job.result = KOReaderSyncClient::getProgress(job.primaryHash, job.remote);
-      if (job.smartProbe && !job.altHash.empty() && job.altHash != job.primaryHash) {
-        job.altResult = KOReaderSyncClient::getProgress(job.altHash, job.altRemote);
-      }
-      break;
-    case KOReaderSyncJob::SILENT_PUSH:
-      job.result = KOReaderSyncClient::updateProgress(job.progress);
-      break;
-  }
+  if (job.opds) {
+    if (job.kind == KOReaderSyncJob::SILENT_PUSH) {
+      job.result =
+          OpdsProgressSync::flushForBook(job.path) ? KOReaderSyncClient::OK : KOReaderSyncClient::NETWORK_ERROR;
+    } else {
+      OpdsProgressSync::Remote remote;
+      int status = 0;
+      const bool fetched = OpdsProgressSync::fetch(job.path, remote, &status);
+      job.result = fetched                            ? KOReaderSyncClient::OK
+                   : (status == 404 || status == 204) ? KOReaderSyncClient::NOT_FOUND
+                                                      : KOReaderSyncClient::NETWORK_ERROR;
+      job.remote.percentage = remote.progression;
+      job.remote.progress = std::move(remote.reference);
+      job.remote.device = std::move(remote.deviceName);
+      job.primaryHash = std::move(remote.modified);
+    }
+  } else
+    switch (job.kind) {
+      case KOReaderSyncJob::FETCH_PROGRESS:
+        job.result = KOReaderSyncClient::getProgress(job.primaryHash, job.remote);
+        if (job.smartProbe && !job.altHash.empty() && job.altHash != job.primaryHash) {
+          job.altResult = KOReaderSyncClient::getProgress(job.altHash, job.altRemote);
+        }
+        break;
+      case KOReaderSyncJob::SILENT_PUSH:
+        job.result = KOReaderSyncClient::updateProgress(job.progress);
+        break;
+    }
   logInternalHeap("after_request");
 
   if (startedRadio && radioStillOursToTearDown()) {

@@ -20,6 +20,9 @@ class XtcReaderActivity final : public Activity {
   ReaderUtils::InputDrainGuard inputDrainGuard;
 
   void renderPage();
+  mutable int64_t opdsReadAt_ = 0;
+  mutable int64_t opdsLastPage_ = -1;
+  mutable float opdsProgress_ = 0;
   void saveProgress() const;
   void loadProgress();
   // Open the chapter list. False when the book has none, so the caller can let the input that

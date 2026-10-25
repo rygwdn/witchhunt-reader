@@ -1,3 +1,5 @@
+#include "OpdsProgressActivity.h"
+#include "network/OpdsProgressSync.h"
 #define DEBUG_MEMORY_CONSUMPTION 1
 #define DEBUG_BACKGROUND_WORK 1
 #define DEBUG_BACKGROUND_OVERLAY 0
@@ -14,8 +16,6 @@
 #ifndef DEBUG_BACKGROUND_WORK
 #define DEBUG_BACKGROUND_WORK 0
 #endif
-
-#include "EpubReaderActivity.h"
 
 #include <CooperativeAbort.h>
 #include <Epub/FootnotePreviews.h>
@@ -44,6 +44,7 @@
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
 #include "DictionaryWordSelectActivity.h"
+#include "EpubReaderActivity.h"
 #include "EpubReaderChapterSelectionActivity.h"
 #include "EpubReaderFootnotesActivity.h"
 #include "EpubReaderPercentSelectionActivity.h"
@@ -641,22 +642,24 @@ void EpubReaderActivity::onEnter() {
   bookInlineFootnotePreviewsOverride = currentBook.inlineFootnotePreviewsOverride;
   logReaderMemSnapshot("onEnter_after_recent_books");
 
+  opdsSyncAssociated_ = OpdsProgressSync::associated(epub->getPath());
   // Start a reading-stats session. We use the cheap filename-based hash here:
   // computing the content hash would re-read the file on every reader open,
   // and a renamed book getting a new stats entry is acceptable — it'll still
   // accumulate going forward.
   globalReadingSessionTracker().begin(KOReaderDocumentId::calculateFromFilename(epub->getPath()), epub->getTitle(),
-                                      epub->getAuthor());
+                                      epub->getAuthor(), epub->getPath());
   // Bookmarks + recent-books overrides + the stats session. These are the loads a wake
   // shortcut would most plausibly skip or cache in RTC, so they get their own bucket.
   WakeTrace::mark(WakeTrace::Phase::StoresLoaded);
 
 #if CROSSPOINT_KOREADER_AUTOSYNC
-  if (KOReaderAutoSync::sleepPushEnabled() || KOReaderAutoSync::intervalPushEnabled()) {
+  if (KOReaderAutoSync::sleepPushEnabled(opdsSyncAssociated_) ||
+      KOReaderAutoSync::intervalPushEnabled(opdsSyncAssociated_)) {
     AUTOSYNC_STATE.seedLastSeen(
         currentSpineIndex, navTarget.kind == NavigationTarget::Kind::Page ? navTarget.page : navTarget.fallbackPage);
   }
-  autoSyncPullPending = KOReaderAutoSync::pullEnabled() && WakeTrace::isResume();
+  autoSyncPullPending = KOReaderAutoSync::pullEnabled(opdsSyncAssociated_) && WakeTrace::isResume();
   autoSyncIndicator = SyncIndicator::None;
   if (KOREADER_STORE.getShowSyncIndicator() && AUTOSYNC_STATE.lastSyncFailed()) {
     autoSyncIndicator = SyncIndicator::Failed;
@@ -760,6 +763,10 @@ void EpubReaderActivity::onExit() {
   // controller's retained RED RAM instead of its host baseline (ghosting). No-op on X3.
   renderer.setSingleBufferFastDiff(false);
   UITheme::getInstance().getMutableTheme().onBookWillClose(epub ? epub->getPath() : "", epub.get(), nullptr, nullptr);
+  if (epub && opdsProgressDirty_) {
+    OpdsProgressSync::queue(epub->getPath(), opdsProgress_, epub->getSpineItem(opdsSpine_).href, opdsReadAt_);
+    opdsProgressDirty_ = false;
+  }
   epub.reset();
   currentPageFootnotes.clear();
   currentPageFootnotes.shrink_to_fit();
@@ -1856,7 +1863,7 @@ void EpubReaderActivity::stepCurrentSectionBuild() {
 
 // Translate an absolute percent into a spine index plus a normalized position
 // within that spine so we can jump after the section is loaded.
-void EpubReaderActivity::jumpToPercent(int percent) {
+void EpubReaderActivity::jumpToPercent(float percent) {
   if (!epub) {
     return;
   }
@@ -1867,12 +1874,10 @@ void EpubReaderActivity::jumpToPercent(int percent) {
   }
 
   // Normalize input to 0-100 to avoid invalid jumps.
-  percent = clampPercent(percent);
+  percent = std::clamp(percent, 0.0f, 100.0f);
 
   // Convert percent into a byte-like absolute position across the spine sizes.
-  // Use an overflow-safe computation: (bookSize / 100) * percent + (bookSize % 100) * percent / 100
-  size_t targetSize =
-      (bookSize / 100) * static_cast<size_t>(percent) + (bookSize % 100) * static_cast<size_t>(percent) / 100;
+  size_t targetSize = static_cast<size_t>(static_cast<double>(bookSize) * percent / 100.0);
   if (percent >= 100) {
     // Ensure the final percent lands inside the last spine item.
     targetSize = bookSize - 1;
@@ -2242,6 +2247,10 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
         pendingScreenshot = true;
       }
       requestUpdate();
+      break;
+    }
+    case EpubReaderMenuActivity::MenuAction::OPDS_PROGRESS: {
+      launchOpdsProgress();
       break;
     }
     case EpubReaderMenuActivity::MenuAction::PULL_REMOTE: {
@@ -4380,6 +4389,14 @@ void EpubReaderActivity::saveProgress(int spineIndex, int currentPage, int pageC
   // overwrites the stored per-book progress, so an unknown 0 at session end would regress it.
   if (pageCount > 0) {
     globalReadingSessionTracker().updateProgress(percent);
+    opdsProgress_ = epub->calculateProgress(spineIndex, static_cast<float>(currentPage) / pageCount);
+    opdsSpine_ = spineIndex;
+    if (opdsSavedSpine_ >= 0 && (opdsSavedSpine_ != spineIndex || opdsSavedPage_ != currentPage)) {
+      opdsProgressDirty_ = true;
+      opdsReadAt_ = OpdsProgressSync::nowMilliseconds();
+    }
+    opdsSavedSpine_ = spineIndex;
+    opdsSavedPage_ = currentPage;
   }
   LOG_DBG("ERS", "Progress saved: Chapter %d, Page %d (%d%%)", spineIndex, currentPage, percent);
 }
@@ -5741,7 +5758,7 @@ void EpubReaderActivity::openReaderMenu() {
           bookSdFontFamilyOverride, bookFontSizeOverride, SETTINGS.textDarkness, getEffectiveBionicReading(),
           bookGuideDotsOverride, bookParagraphAlignmentOverride, bookTextAntiAliasingOverride, bookHyphenationOverride,
           bookFontSizeNormalizationOverride, bookInlineFootnotePreviewsOverride, !bookmarkStore.isEmpty(),
-          isCurrentPageStarred, hasPrintedPages),
+          isCurrentPageStarred, hasPrintedPages, OpdsProgressSync::associated(epub->getPath())),
       [this](const ActivityResult& result) {
         const auto& menu = std::get<MenuResult>(result.data);
         applyOrientation(menu.orientation);

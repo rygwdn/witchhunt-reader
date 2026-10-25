@@ -32,6 +32,7 @@
 #include "activities/home/RecentBooksActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "network/OpdsProgressSync.h"
 
 namespace {
 std::string extractFolderPath(const std::string& filePath) {
@@ -488,7 +489,8 @@ void launchFinishedBookFlow(Activity& host, GfxRenderer& renderer, MappedInputMa
                                                      const std::string&),
                             void* onSyncToKOReaderCtx) {
   const std::string nextBookPath = findNextBookInDirectory(bookPath, series, seriesIndex);
-  const bool koReaderSyncAvailable = onSyncToKOReader != nullptr && KOREADER_STORE.hasCredentials();
+  const bool koReaderSyncAvailable =
+      onSyncToKOReader != nullptr && (OpdsProgressSync::associated(bookPath) || KOREADER_STORE.hasCredentials());
   Activity* hostPtr = &host;
   host.startActivityForResult(
       std::make_unique<FinishedBookActivity>(renderer, mappedInput, bookPath, nextBookPath, author,
@@ -505,6 +507,7 @@ void launchFinishedBookFlow(Activity& host, GfxRenderer& renderer, MappedInputMa
         // User confirmed they're done with this book — credit a finish to the
         // in-flight session before any tear-down side effects.
         globalReadingSessionTracker().markFinished();
+        OpdsProgressSync::queue(bookPath, 1.0f, "", OpdsProgressSync::nowMilliseconds());
         const auto& menuResult = std::get<MenuResult>(result.data);
         const bool goHome = menuResult.action == static_cast<int>(FinishedBookAction::GoHome);
         const bool openNext =
@@ -522,14 +525,16 @@ void launchFinishedBookFlow(Activity& host, GfxRenderer& renderer, MappedInputMa
         if (SETTINGS.moveFinishedBooksToCompleted) {
           std::string movedPath;
           if (moveFinishedBookToCompleted(bookPath, movedPath)) {
+            if (OpdsProgressSync::associated(bookPath)) OpdsProgressSync::copyAssociation(bookPath, movedPath);
             effectiveBookPath = movedPath;
           }
         }
         if (SETTINGS.removeFinishedBooksFromRecents) {
           RECENT_BOOKS.removeBook(bookPath);
         }
-        const bool syncToKOReader =
-            onSyncToKOReader != nullptr && KOREADER_STORE.hasCredentials() && SETTINGS.syncFinishedBookToKOReader;
+        const bool syncToKOReader = onSyncToKOReader != nullptr &&
+                                    (OpdsProgressSync::associated(bookPath) || KOREADER_STORE.hasCredentials()) &&
+                                    SETTINGS.syncFinishedBookToKOReader;
         if (syncToKOReader) {
           // The sync callback (EpubReaderActivity::launchKOReaderSync) hands off to
           // KOReaderSyncActivity, which owns pushing progress and, once its reboot completes,
@@ -570,7 +575,8 @@ FinishedBookActivity::FinishedBookActivity(GfxRenderer& renderer, MappedInputMan
       nextBookPath_(std::move(nextBookPath)),
       currentBookAuthor_(std::move(currentBookAuthor)),
       nextBookAvailable_(!nextBookPath_.empty()),
-      koReaderSyncAvailable_(koReaderSyncAvailable) {
+      koReaderSyncAvailable_(koReaderSyncAvailable),
+      opdsSyncAvailable_(OpdsProgressSync::associated(currentBookPath_)) {
   nextBookName_ = nextBookAvailable_ ? getFilename(nextBookPath_) : tr(STR_NOT_SET);
 }
 
@@ -610,7 +616,7 @@ FinishedBookActivity::RowModel FinishedBookActivity::buildRowModel() const {
     // A toggle, not an action row, so it composes with whichever of GoHome/OpenNext/SearchOpds
     // is picked above instead of replacing it — see launchFinishedBookFlow.
     model.actions.push_back(RowModel::Action::ToggleSyncToKOReader);
-    model.titles.push_back(tr(STR_KO_SYNC_FINISHED_BOOK));
+    model.titles.push_back(opdsSyncAvailable_ ? tr(STR_OPDS_SYNC_FINISHED_BOOK) : tr(STR_KO_SYNC_FINISHED_BOOK));
     model.values.push_back(syncFinishedBookToKOReader_ ? tr(STR_STATE_ON) : tr(STR_STATE_OFF));
   }
 

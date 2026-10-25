@@ -1,11 +1,10 @@
+#include "network/OpdsProgressSync.h"
 /**
  * XtcReaderActivity.cpp
  *
  * XTC ebook reader activity implementation
  * Displays pre-rendered XTC pages on e-ink display
  */
-
-#include "XtcReaderActivity.h"
 
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
@@ -24,6 +23,7 @@
 #include "ReaderUtils.h"
 #include "ReadingSessionTracker.h"
 #include "RecentBooksStore.h"
+#include "XtcReaderActivity.h"
 #include "XtcReaderChapterSelectionActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -53,7 +53,7 @@ void XtcReaderActivity::onEnter() {
   // Start the reading-stats session. XTC has real title/author from the
   // file header so the per-book screen will look nicer than TXT/MD.
   globalReadingSessionTracker().begin(KOReaderDocumentId::calculateFromFilename(xtc->getPath()), xtc->getTitle(),
-                                      xtc->getAuthor());
+                                      xtc->getAuthor(), xtc->getPath());
 
   // Trigger first update
   requestUpdate();
@@ -80,6 +80,7 @@ void XtcReaderActivity::onExit() {
   APP_STATE.saveToFile();
 
   UITheme::getInstance().getMutableTheme().onBookWillClose(xtc ? xtc->getPath() : "", nullptr, xtc.get(), nullptr);
+  if (xtc && opdsReadAt_ > 0) OpdsProgressSync::queue(xtc->getPath(), opdsProgress_, "", opdsReadAt_);
   xtc.reset();
 }
 
@@ -368,6 +369,9 @@ void XtcReaderActivity::saveProgress() const {
     f.write(data, 5);
     f.close();
     globalReadingSessionTracker().updateProgress(percent);
+    if (opdsLastPage_ >= 0 && opdsLastPage_ != currentPage) opdsReadAt_ = OpdsProgressSync::nowMilliseconds();
+    opdsLastPage_ = currentPage;
+    opdsProgress_ = xtc->getPageCount() > 0 ? static_cast<float>(currentPage + 1) / xtc->getPageCount() : 0;
   }
 }
 

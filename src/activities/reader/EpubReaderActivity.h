@@ -25,6 +25,7 @@
 #include "activities/Activity.h"
 #include "components/themes/BaseTheme.h"
 #include "components/themes/TapTargets.h"
+#include "network/OpdsProgressSync.h"
 
 class EpubReaderActivity final : public Activity {
   // Reader can launch sync in several UX modes:
@@ -559,6 +560,9 @@ class EpubReaderActivity final : public Activity {
   // inspection of a book should not trigger a network round-trip. Reset on every reader
   // entry; not persisted, since "session" means the lifetime of this activity instance.
   int sessionPagesAdvanced = 0;
+  bool opdsSyncAssociated_ = false;
+  void queueOpdsProgress();
+  void launchOpdsProgress(const OpdsProgressSync::Remote* cached = nullptr);
 
 #if CROSSPOINT_KOREADER_AUTOSYNC
   bool autoSyncPullPending = false;
@@ -803,6 +807,11 @@ class EpubReaderActivity final : public Activity {
   mutable int lastStatusBarBattery = -1;
   mutable int lastStatusBarClockMinute = -1;
   bool maybeRestartForFragmentedHeap(uint32_t freeHeap, uint32_t contigHeap);
+  int opdsSavedSpine_ = -1, opdsSavedPage_ = -1;
+  int64_t opdsReadAt_ = 0;
+  bool opdsProgressDirty_ = false;
+  float opdsProgress_ = 0;
+  int opdsSpine_ = 0;
   void saveProgress(int spineIndex, int currentPage, int pageCount);
   // Writes the canonical EPUB progress.bin layout: spine(2) + page(2) + pageCount(2) + percent(1).
   // Used by the per-page saveProgress() and by transient writers (sync restore, bookmark jump) so
@@ -811,7 +820,7 @@ class EpubReaderActivity final : public Activity {
   static bool writeReaderProgressCache(const std::string& cachePath, int spineIndex, int currentPage, int pageCount,
                                        uint8_t percent);
   // Jump to a percentage of the book (0-100), mapping it to spine and page.
-  void jumpToPercent(int percent);
+  void jumpToPercent(float percent);
   void onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction action);
 
   // Open word selection over the current page, or the dictionary picker when no

@@ -7,6 +7,7 @@
 
 #include "../Activity.h"
 #include "OpdsServerStore.h"
+#include "network/HttpDownloader.h"
 #include "util/ButtonNavigator.h"
 
 /**
@@ -54,6 +55,9 @@ class OpdsBookBrowserActivity final : public Activity {
   bool consumeBack = false;
   bool memoryTrimmed = false;
   bool coverAvailable = false;
+  bool jsonFeed = false;
+  bool progressConflict = false;
+  std::unique_ptr<HttpDownloader::Session> httpSession;
   int selectorIndex = 0;
   int selectedBookIndex = -1;
   int formatSelectorIndex = 0;
@@ -71,6 +75,8 @@ class OpdsBookBrowserActivity final : public Activity {
   void checkAndConnectWifi();
   void launchWifiSelection();
   void onWifiSelectionComplete(bool connected);
+  int pageItems() const;
+  void prepareCoverPage();
   void fetchFeed(const std::string& path);
   void navigateToEntry(const OpdsEntry& entry);
   void navigateBack();

@@ -85,6 +85,9 @@ class LineReaderActivity : public Activity {
 
   // progress.bin, 7-byte format: page(2 LE) + file offset(4 LE) + percent(1).
   // The offset lets drawCurrentPageToBuffer render without requiring index.bin.
+  mutable int64_t opdsReadAt_ = 0;
+  mutable int64_t opdsLastPage_ = -1;
+  mutable float opdsProgress_ = 0;
   void saveProgress() const;
   void loadProgress();
 

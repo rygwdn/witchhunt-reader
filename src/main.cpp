@@ -612,7 +612,8 @@ void enterDeepSleep(bool fromTimeout = false, BootDiag::SleepTrigger trigger = B
   // Deiniting esp_wifi under a worker job's open socket crashes so let's drain first.
   constexpr unsigned long AUTO_SYNC_PRESLEEP_DRAIN_MS = 3000;
   keepRadioUp = !KOReaderSyncWorker::drain(AUTO_SYNC_PRESLEEP_DRAIN_MS);
-  keepRadioUp = keepRadioUp || (KOReaderAutoSync::sleepPushEnabled() && activityManager.isReaderActivity());
+  keepRadioUp = keepRadioUp ||
+                (KOReaderAutoSync::sleepPushEnabled(OPDS_STORE.hasServers()) && activityManager.isReaderActivity());
 #endif
   // Tear down WiFi so the modem power domain isn't held alive across deep sleep.
   // Wake from deep sleep is effectively a chip reset, so no state needs to survive.
