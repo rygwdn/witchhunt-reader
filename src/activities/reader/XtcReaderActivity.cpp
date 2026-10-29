@@ -29,6 +29,7 @@
 #include "XtcReaderChapterSelectionActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "network/OpdsProgressSync.h"
 
 void XtcReaderActivity::onEnter() {
   Activity::onEnter();
@@ -85,6 +86,7 @@ void XtcReaderActivity::onExit() {
   APP_STATE.saveToFile();
 
   UITheme::getInstance().getMutableTheme().onBookWillClose(xtc ? xtc->getPath() : "", nullptr, xtc.get(), nullptr);
+  if (xtc && opdsReadAt_ > 0) OpdsProgressSync::queue(xtc->getPath(), opdsProgress_, "", opdsReadAt_);
   xtc.reset();
   // Last, as in EpubReaderActivity::onExit().
   BookRelocation::bookClosed();
@@ -200,7 +202,8 @@ void XtcReaderActivity::loop() {
     if (nextTriggered) {
       saveProgress();
       BookFinished::launchFinishedBookFlow(*this, renderer, mappedInput, xtc->getPath(), std::string(), std::string(),
-                                           xtc->getAuthor());
+                                           xtc->getAuthor(), nullptr, nullptr, nullptr, nullptr,
+                                           [this] { opdsReadAt_ = 0; });
     } else {
       currentPage = xtc->getPageCount() - 1;
       requestUpdate();
@@ -375,6 +378,9 @@ void XtcReaderActivity::saveProgress() const {
     f.write(data, 5);
     f.close();
     globalReadingSessionTracker().updateProgress(percent);
+    if (opdsLastPage_ >= 0 && opdsLastPage_ != currentPage) opdsReadAt_ = OpdsProgressSync::nowMilliseconds();
+    opdsLastPage_ = currentPage;
+    opdsProgress_ = xtc->getPageCount() > 0 ? static_cast<float>(currentPage + 1) / xtc->getPageCount() : 0;
   }
 }
 

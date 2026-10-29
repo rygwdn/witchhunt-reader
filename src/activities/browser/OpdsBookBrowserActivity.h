@@ -75,6 +75,9 @@ class OpdsBookBrowserActivity final : public Activity {
   // "Format not supported" over the list or the book detail, after Confirm on a book the catalog
   // offers only in formats the reader cannot open. The next press, tap or swipe only takes it down.
   bool formatNotice = false;
+  // OpdsProgressSync::flush() found a fresher server record than this device's queued upload: the
+  // outbox lost, and the reader's Sync menu fetches the server position instead.
+  bool progressConflict = false;
 
   OpdsServer server;  // Copied at construction — safe even if the store changes during browsing
   OpdsBackTo backTo;

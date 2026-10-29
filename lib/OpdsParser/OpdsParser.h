@@ -21,6 +21,8 @@ struct OpdsAcquisitionLink {
   std::string mimeType;
   std::string formatKey;
   std::string fileExtension;
+  // Per-file reading position feed link (rel "http://opds-spec.org/progression"), books only.
+  std::string progressionHref;
 };
 
 /**
@@ -44,6 +46,8 @@ struct OpdsEntry {
   std::string groupTitle;
   std::string seriesTitle;
   std::string seriesHref;
+  // Reading-position feed link on the entry itself (rel "http://opds-spec.org/progression").
+  std::string progressionHref;
 };
 
 // Legacy alias for backward compatibility

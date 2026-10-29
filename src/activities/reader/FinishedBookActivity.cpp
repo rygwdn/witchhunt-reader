@@ -35,6 +35,7 @@
 #include "components/CoverGridLayout.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "network/OpdsProgressSync.h"
 
 namespace {
 std::string extractFolderPath(const std::string& filePath) {
@@ -551,6 +552,7 @@ std::string applyFinishedBookSettings(const std::string& bookPath, const bool op
   }
   std::string movedPath;
   if (SETTINGS.moveFinishedBooksToCompleted && moveFinishedBookToCompleted(bookPath, movedPath, openInReader)) {
+    if (OpdsProgressSync::associated(bookPath)) OpdsProgressSync::copyAssociation(bookPath, movedPath);
     return movedPath;
   }
   return bookPath;
@@ -561,15 +563,16 @@ void launchFinishedBookFlow(Activity& host, GfxRenderer& renderer, MappedInputMa
                             const std::string& author, void (*onMenuClosed)(void*), void* onMenuClosedCtx,
                             bool (*onSyncToKOReader)(void*, const std::string&, KOReaderSyncPostAction,
                                                      const std::string&),
-                            void* onSyncToKOReaderCtx) {
+                            void* onSyncToKOReaderCtx, const std::function<void()>& onCompletionQueued) {
   const std::string nextBookPath = findNextBookInDirectory(bookPath, series, seriesIndex);
-  const bool koReaderSyncAvailable = onSyncToKOReader != nullptr && KOREADER_STORE.hasCredentials();
+  const bool koReaderSyncAvailable =
+      onSyncToKOReader != nullptr && (OpdsProgressSync::associated(bookPath) || KOREADER_STORE.hasCredentials());
   Activity* hostPtr = &host;
   host.startActivityForResult(
       std::make_unique<FinishedBookActivity>(renderer, mappedInput, bookPath, nextBookPath, author,
                                              koReaderSyncAvailable),
-      [hostPtr, bookPath, nextBookPath, author, onMenuClosed, onMenuClosedCtx, onSyncToKOReader,
-       onSyncToKOReaderCtx](const ActivityResult& result) {
+      [hostPtr, bookPath, nextBookPath, author, onMenuClosed, onMenuClosedCtx, onSyncToKOReader, onSyncToKOReaderCtx,
+       onCompletionQueued](const ActivityResult& result) {
         if (onMenuClosed) {
           onMenuClosed(onMenuClosedCtx);
         }
@@ -580,6 +583,12 @@ void launchFinishedBookFlow(Activity& host, GfxRenderer& renderer, MappedInputMa
         // User confirmed they're done with this book — credit a finish to the
         // in-flight session before any tear-down side effects.
         globalReadingSessionTracker().markFinished();
+        // Queue completion before any move renames the book: the outbox entry carries the path it
+        // was keyed under. A queued completion retires the reader's dirty snapshot so closing the
+        // reader cannot replay an older page over the queued 1.0.
+        if (OpdsProgressSync::queue(bookPath, 1.0f, "", OpdsProgressSync::nowMilliseconds()) && onCompletionQueued) {
+          onCompletionQueued();
+        }
         const auto& menuResult = std::get<MenuResult>(result.data);
         const bool goHome = menuResult.action == static_cast<int>(FinishedBookAction::GoHome);
         const bool openNext =
@@ -594,8 +603,9 @@ void launchFinishedBookFlow(Activity& host, GfxRenderer& renderer, MappedInputMa
         // actions below was picked, and no matter whether the sync toggle is also on — the
         // toggle composes with the picked action rather than replacing it.
         const std::string effectiveBookPath = applyFinishedBookSettings(bookPath, true);
-        const bool syncToKOReader =
-            onSyncToKOReader != nullptr && KOREADER_STORE.hasCredentials() && SETTINGS.syncFinishedBookToKOReader;
+        const bool syncToKOReader = onSyncToKOReader != nullptr &&
+                                    (OpdsProgressSync::associated(bookPath) || KOREADER_STORE.hasCredentials()) &&
+                                    SETTINGS.syncFinishedBookToKOReader;
         if (syncToKOReader) {
           // The sync callback (EpubReaderActivity::launchKOReaderSync) hands off to
           // KOReaderSyncActivity, which owns pushing progress and, once its reboot completes,
@@ -639,7 +649,8 @@ FinishedBookActivity::FinishedBookActivity(GfxRenderer& renderer, MappedInputMan
       currentBookAuthor_(std::move(currentBookAuthor)),
       nextBookAvailable_(!nextBookPath_.empty()),
       nextBookMetadataLoaded_(nextBookPath_.empty()),
-      koReaderSyncAvailable_(koReaderSyncAvailable) {
+      koReaderSyncAvailable_(koReaderSyncAvailable),
+      opdsSyncAvailable_(OpdsProgressSync::associated(currentBookPath_)) {
   // Until the preview has loaded, the next-book row names the file.
   if (nextBookAvailable_) nextBookTitle_ = getFilename(nextBookPath_);
 }
@@ -700,7 +711,7 @@ void FinishedBookActivity::provideRow(void* ctx, const uint16_t index, fui::List
       item.toggleChecked = SETTINGS.removeFinishedBooksFromRecents != 0;
       break;
     case Row::ToggleSyncToKOReader:
-      item.label = tr(STR_KO_SYNC_FINISHED_BOOK);
+      item.label = self->opdsSyncAvailable_ ? tr(STR_OPDS_SYNC_FINISHED_BOOK) : tr(STR_KO_SYNC_FINISHED_BOOK);
       item.toggle = true;
       item.toggleChecked = SETTINGS.syncFinishedBookToKOReader != 0;
       break;

@@ -16,6 +16,7 @@
 #include "SerialTestApi.h"
 #include "activities/home/BookDetails.h"
 #include "components/UITheme.h"
+#include "network/OpdsProgressSync.h"
 
 void LineReaderActivity::onEnter() {
   Activity::onEnter();
@@ -94,6 +95,7 @@ void LineReaderActivity::onExit() {
   APP_STATE.readerActivityLoadCount = 0;
   APP_STATE.saveToFile();
   UITheme::getInstance().getMutableTheme().onBookWillClose(txt ? txt->getPath() : "", nullptr, nullptr, txt.get());
+  if (txt && opdsReadAt_ > 0) OpdsProgressSync::queue(txt->getPath(), opdsProgress_, "", opdsReadAt_);
   txt.reset();
   // Last, as in EpubReaderActivity::onExit().
   BookRelocation::bookClosed();
@@ -253,7 +255,8 @@ void LineReaderActivity::goToNextPage() {
 void LineReaderActivity::launchFinishedBookFlow() {
   saveProgress();
   BookFinished::launchFinishedBookFlow(*this, renderer, mappedInput, txt ? txt->getPath() : std::string(),
-                                       std::string(), std::string());
+                                       std::string(), std::string(), /*author=*/std::string(), nullptr, nullptr,
+                                       nullptr, nullptr, [this] { opdsReadAt_ = 0; });
 }
 
 LineReaderActivity::TextLayout LineReaderActivity::computeTextLayout(const GfxRenderer& renderer, const int fontId,
@@ -329,6 +332,9 @@ void LineReaderActivity::saveProgress() const {
     f.write(data, 7);
     f.close();
     globalReadingSessionTracker().updateProgress(percent);
+    if (opdsLastPage_ >= 0 && opdsLastPage_ != currentPage) opdsReadAt_ = OpdsProgressSync::nowMilliseconds();
+    opdsLastPage_ = currentPage;
+    opdsProgress_ = totalPages > 0 ? static_cast<float>(currentPage + 1) / totalPages : 0;
   }
 }
 

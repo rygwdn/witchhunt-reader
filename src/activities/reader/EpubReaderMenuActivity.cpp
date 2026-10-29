@@ -85,9 +85,10 @@ EpubReaderMenuActivity::EpubReaderMenuActivity(
     const int8_t initialTextAntiAliasingOverride, const int8_t initialHyphenationOverride,
     const int8_t initialFontSizeNormalizationOverride, const int8_t initialInlineFootnotePreviewsOverride,
     const int8_t initialLineSpacingOverride, const bool hasStarredPages, const bool isCurrentPageStarred,
-    const bool hasPrintedPages)
+    const bool hasPrintedPages, const bool hasOpdsProgression)
     : TabbedUiListActivity("EpubReaderMenu", renderer, mappedInput),
       currentPageStarred(isCurrentPageStarred),
+      hasOpdsProgression_(hasOpdsProgression),
       pendingOrientation(currentOrientation),
       pendingEmbeddedStyleOverride(initialEmbeddedStyleOverride),
       pendingImageRenderingOverride(initialImageRenderingOverride),
@@ -108,22 +109,23 @@ EpubReaderMenuActivity::EpubReaderMenuActivity(
       currentPage(currentPage),
       totalPages(totalPages),
       bookProgressPercent(bookProgressPercent) {
-  buildMenuItems(hasFootnotes, hasStarredPages, hasPrintedPages);
+  buildMenuItems(hasFootnotes, hasStarredPages, hasPrintedPages, hasOpdsProgression);
 }
 
-void EpubReaderMenuActivity::buildMenuItems(bool hasFootnotes, bool hasStarredPages, bool hasPrintedPages) {
+void EpubReaderMenuActivity::buildMenuItems(bool hasFootnotes, bool hasStarredPages, bool hasPrintedPages,
+                                            bool hasOpdsProgression) {
   auto& navigationItems = tabMenuItems[static_cast<size_t>(MenuTab::Navigation)];
   auto& settingsItems = tabMenuItems[static_cast<size_t>(MenuTab::Settings)];
   auto& syncItems = tabMenuItems[static_cast<size_t>(MenuTab::Sync)];
   auto& toolsItems = tabMenuItems[static_cast<size_t>(MenuTab::Tools)];
   navigationItems.reserve(8);
   settingsItems.reserve(13);
-  syncItems.reserve(3);
+  syncItems.reserve(4);
   toolsItems.reserve(8);
 
   visibleTabs[visibleTabCount++] = MenuTab::Navigation;
   visibleTabs[visibleTabCount++] = MenuTab::Settings;
-  if (KOREADER_STORE.hasCredentials()) visibleTabs[visibleTabCount++] = MenuTab::Sync;
+  if (KOREADER_STORE.hasCredentials() || hasOpdsProgression) visibleTabs[visibleTabCount++] = MenuTab::Sync;
   visibleTabs[visibleTabCount++] = MenuTab::Tools;
 
   navigationItems.push_back(SettingInfo::Action(StrId::STR_SELECT_CHAPTER, SettingAction::None));
@@ -392,6 +394,9 @@ void EpubReaderMenuActivity::buildMenuItems(bool hasFootnotes, bool hasStarredPa
             threeStateOverrideFromSlot(v);
       }));
 
+  if (hasOpdsProgression) {
+    syncItems.push_back(SettingInfo::Action(StrId::STR_OPDS_PULL_PROGRESS, SettingAction::None));
+  }
   if (KOREADER_STORE.hasCredentials()) {
     syncItems.push_back(SettingInfo::Action(StrId::STR_PULL_PROGRESS_FROM_OTHER_DEVICES, SettingAction::None));
     syncItems.push_back(SettingInfo::Action(StrId::STR_PUSH_PROGRESS_FROM_THIS_DEVICE, SettingAction::None));
@@ -440,6 +445,8 @@ EpubReaderMenuActivity::MenuAction EpubReaderMenuActivity::actionForNameId(StrId
       return MenuAction::ROTATE_SCREEN;
     case StrId::STR_PULL_PROGRESS_FROM_OTHER_DEVICES:
       return MenuAction::PULL_REMOTE;
+    case StrId::STR_OPDS_PULL_PROGRESS:
+      return MenuAction::OPDS_PROGRESS;
     case StrId::STR_PUSH_PROGRESS_FROM_THIS_DEVICE:
       return MenuAction::PUSH_LOCAL;
     case StrId::STR_COMPARE_PROGRESS_WITH_OTHER_DEVICES:

@@ -889,3 +889,10 @@ STR_MOVE_NAME_TAKEN: "A file of that name is already there"
 STR_MOVE_SAME_FOLDER: "It is already in that folder"
 STR_SHOW_BUSY_INDICATOR: "Show Busy Indicator"
 STR_SERIES: "Series"
+
+STR_OPDS_PULL_PROGRESS: "Fetch OPDS progress"
+STR_OPDS_APPLY_PROGRESS: "Resume at the server position?"
+STR_OPDS_PROGRESS_UNAVAILABLE: "No server progress available. Back to return."
+STR_OPDS_PROGRESS_CONFLICT: "Newer server progress exists. Fetch it from the reader Sync menu."
+
+STR_OPDS_SYNC_FINISHED_BOOK: "Sync via OPDS"

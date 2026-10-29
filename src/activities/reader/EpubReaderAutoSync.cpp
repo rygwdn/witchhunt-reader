@@ -12,6 +12,7 @@
 #include "KOReaderDocumentId.h"
 #include "ProgressComparison.h"
 #include "activities/ActivityManager.h"
+#include "network/OpdsSyncPolicy.h"
 
 namespace {
 // The reader's position as ProgressComparison wants it: the page; the paragraph LUT at the end of
@@ -42,6 +43,10 @@ std::string hashFor(const std::string& path, const DocumentMatchMethod method) {
   return method == DocumentMatchMethod::FILENAME ? KOReaderDocumentId::calculateFromFilename(path)
                                                  : KOReaderDocumentId::calculate(path);
 }
+
+// Fractional width of one rendered page: two positions within it are the same page for the
+// OPDS wake-pull comparison (see OpdsSyncPolicy::sameReadingPage).
+constexpr float SAME_PROGRESS_EPSILON = 0.001f;
 }  // namespace
 
 // Auto-sync runs on the loop task (serviceAutoSync() from loop()), but what it reads belongs to
@@ -67,6 +72,10 @@ bool EpubReaderActivity::autoSyncReaderIsQuiet() const {
 // The caller holds the render lock: this reads `section`'s lookup tables, and ProgressMapper reads
 // `epub`'s metadata cache.
 KOReaderPosition EpubReaderActivity::currentKoPosition(const int page, const int pageCount) const {
+  if (opdsSyncAssociated_) {
+    return {epub->getSpineItem(currentSpineIndex).href,
+            epub->calculateProgress(currentSpineIndex, pageCount > 0 ? static_cast<float>(page) / pageCount : 0)};
+  }
   CrossPointPosition pos{};
   pos.spineIndex = currentSpineIndex;
   pos.pageNumber = page;
@@ -85,7 +94,7 @@ KOReaderPosition EpubReaderActivity::currentKoPosition(const int page, const int
 }
 
 void EpubReaderActivity::maybeAutoPullOnWake() {
-  if (!KOReaderAutoSync::pullEnabled()) {
+  if (!KOReaderAutoSync::pullEnabled(opdsSyncAssociated_)) {
     autoSyncPullPending = false;
     return;
   }
@@ -103,6 +112,14 @@ void EpubReaderActivity::maybeAutoPullOnWake() {
   }
 
   const std::string path = epub->getPath();
+  if (opdsSyncAssociated_) {
+    // No document hash involved: the association carries the book's progression URL.
+    KOReaderSyncJob job;
+    job.opds = true;
+    job.path = path;
+    if (KOReaderSyncWorker::post(std::move(job), &autoSyncPullSeq)) autoSyncPullPending = false;
+    return;
+  }
   const DocumentMatchMethod method = KOReaderAutoSync::effectiveMatchMethod(path);
   std::string primaryHash = hashFor(path, method);
   if (primaryHash.empty()) {
@@ -153,7 +170,14 @@ bool EpubReaderActivity::pollAutoSyncPull() {
     autoSyncPullJobPending = false;
     askUser = evaluateAutoSyncPull();
   }
-  // After release: launching the compare screen pushes an activity, which takes the lock.
+  // After release: launching an activity pushes one, which takes the lock. An OPDS pull launches
+  // its own progress screen; the KOReader path hands off to the compare screen.
+  if (askUser && opdsPullPending_) {
+    opdsPullPending_ = false;
+    launchOpdsProgress(&opdsPullRemote_);
+    autoSyncPullDialogLaunched = true;
+    return true;
+  }
   autoSyncPullDialogLaunched = askUser && handOffToInteractiveSync();
   return autoSyncPullDialogLaunched;
 }
@@ -163,6 +187,32 @@ bool EpubReaderActivity::pollAutoSyncPull() {
 bool EpubReaderActivity::evaluateAutoSyncPull() {
   autoSyncPullDialogLaunched = false;
   KOReaderSyncJob job = std::exchange(autoSyncPullJob, {});
+
+  if (job.opds) {
+    if (job.result == KOReaderSyncClient::NOT_FOUND) {
+      silentUploadCurrentPosition();
+      return false;
+    }
+    if (job.result != KOReaderSyncClient::OK) {
+      AUTOSYNC_STATE.markSyncFailed();
+      return false;
+    }
+    const int total = section->estimatedTotalPages();
+    const float local = currentKoPosition(section->currentPage, total).percentage;
+    const float pageEnd =
+        total > 0 ? epub->calculateProgress(currentSpineIndex, static_cast<float>(section->currentPage + 1) / total)
+                  : local;
+    if (OpdsSyncPolicy::sameReadingPage(local, pageEnd, job.remote.percentage, SAME_PROGRESS_EPSILON)) {
+      AUTOSYNC_STATE.markSynced(epub->getPath(), currentSpineIndex, section->currentPage);
+    } else if (!opdsProgressDirty_) {
+      // OPDS is timestamp-based. Never use KOReader's furthest-wins rule for rereads.
+      opdsPullRemote_ =
+          OpdsProgressSync::Remote{job.remote.percentage, job.primaryHash, job.remote.device, job.remote.progress};
+      opdsPullPending_ = true;
+      return true;
+    }
+    return false;
+  }
 
   const bool smart = KOREADER_STORE.getSyncBehavior() == KOReaderSyncBehavior::SMART;
   const std::string path = epub->getPath();
@@ -259,6 +309,8 @@ void EpubReaderActivity::silentUploadCurrentPosition() {
   if (page < 0 || total <= 0) {
     return;
   }
+  queueOpdsProgress();
+  if (opdsSyncAssociated_ && opdsProgressDirty_) return;  // queue failed; do not push a stale KOReader record
   const KOReaderPosition local = currentKoPosition(page, total);
   autoSyncPushSeq = KOReaderAutoSync::pushSilentAsync(epub->getPath(), local, currentSpineIndex, page, epub->getTitle(),
                                                       epub->getAuthor());
@@ -307,7 +359,7 @@ void EpubReaderActivity::maybeAutoPushInterval() {
   if (activityManager.inSleepTransition()) {
     return;
   }
-  if (!KOReaderAutoSync::intervalPushEnabled()) {
+  if (!KOReaderAutoSync::intervalPushEnabled(opdsSyncAssociated_)) {
     return;
   }
   if (!AUTOSYNC_STATE.lastNoteWasTurn()) {
@@ -332,6 +384,8 @@ void EpubReaderActivity::maybeAutoPushInterval() {
   if (page < 0 || total <= 0) {
     return;
   }
+  queueOpdsProgress();
+  if (opdsSyncAssociated_ && opdsProgressDirty_) return;  // queue failed; do not push a stale KOReader record
   const KOReaderPosition local = currentKoPosition(page, total);
   autoSyncLastPushAt = millis();
   autoSyncPushSeq = KOReaderAutoSync::pushSilentAsync(epub->getPath(), local, currentSpineIndex, page, epub->getTitle(),
@@ -386,7 +440,7 @@ void EpubReaderActivity::serviceAutoSync() {
     page = section->currentPage;
   }
   // Outside the lock: noteProgress() may write its state file.
-  AUTOSYNC_STATE.noteProgress(epub->getPath(), spine, page);
+  AUTOSYNC_STATE.noteProgress(epub->getPath(), spine, page, opdsSyncAssociated_);
   maybeAutoPushInterval();
 }
 
@@ -407,11 +461,12 @@ void EpubReaderActivity::releaseAutoSyncSlot() {
 // epub reads here are already covered.
 void EpubReaderActivity::maybeAutoPushOnSleep() {
   if (epub != nullptr && section != nullptr) {
-    AUTOSYNC_STATE.noteProgress(epub->getPath(), currentSpineIndex, section->currentPage);
+    AUTOSYNC_STATE.noteProgress(epub->getPath(), currentSpineIndex, section->currentPage, opdsSyncAssociated_);
   }
   AUTOSYNC_STATE.flush();
 
-  if (!activityManager.inSleepTransition() || !KOReaderAutoSync::sleepPushEnabled() || !AUTOSYNC_STATE.isPending()) {
+  if (!activityManager.inSleepTransition() || !KOReaderAutoSync::sleepPushEnabled(opdsSyncAssociated_) ||
+      (!opdsSyncAssociated_ && !AUTOSYNC_STATE.isPending())) {
     return;
   }
   // A link followed in THIS session, not the persisted Back stack (footnoteDepth): a stack loaded
@@ -431,6 +486,8 @@ void EpubReaderActivity::maybeAutoPushOnSleep() {
   }
 
   saveProgress(currentSpineIndex, page, total);
+  queueOpdsProgress();
+  if (opdsSyncAssociated_ && opdsProgressDirty_) return;  // queue failed; do not stash a stale KOReader record
   const KOReaderPosition local = currentKoPosition(page, total);
   KOReaderAutoSync::stashSleepPush(epub->getPath(), local, currentSpineIndex, page, epub->getTitle(),
                                    epub->getAuthor());

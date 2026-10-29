@@ -200,7 +200,9 @@ void OpdsParser::startElement(void* userData, const char* name, const char** att
       }
 
       if (self->inEntry) {
-        if (rel && strstr(rel, "opds-spec.org/acquisition") != nullptr) {
+        if (rel && strcmp(rel, "http://opds-spec.org/progression") == 0) {
+          self->currentEntry.progressionHref = href;
+        } else if (rel && strstr(rel, "opds-spec.org/acquisition") != nullptr) {
           const bool directDownload = isDirectAcquisitionRel(rel);
           const auto acquisition = supportedAcquisitionLink(type, href, directDownload);
           if (!acquisition.formatKey.empty() && !hasEquivalentAcquisitionLink(self->currentEntry, acquisition)) {

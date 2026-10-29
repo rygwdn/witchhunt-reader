@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <string>
 
 #include "CrossPointState.h"
@@ -55,7 +56,7 @@ void launchFinishedBookFlow(Activity& host, GfxRenderer& renderer, MappedInputMa
                             void* onMenuClosedCtx = nullptr,
                             bool (*onSyncToKOReader)(void*, const std::string& bookPath, KOReaderSyncPostAction,
                                                      const std::string& target) = nullptr,
-                            void* onSyncToKOReaderCtx = nullptr);
+                            void* onSyncToKOReaderCtx = nullptr, const std::function<void()>& onCompletionQueued = {});
 }  // namespace BookFinished
 
 // What to do now that the book is finished. Pushed by a reader when the last page is turned (see
@@ -123,4 +124,5 @@ class FinishedBookActivity final : public UiListActivity {
   bool nextBookAvailable_ = false;
   bool nextBookMetadataLoaded_ = false;
   bool koReaderSyncAvailable_ = false;
+  bool opdsSyncAvailable_ = false;
 };

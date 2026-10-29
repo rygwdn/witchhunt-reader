@@ -48,7 +48,7 @@ class AutoSyncState {
 
   bool isPositionSynced(const std::string& bookPath, int spine, int page) const;
 
-  void noteProgress(const std::string& bookPath, int spine, int page);
+  void noteProgress(const std::string& bookPath, int spine, int page, bool opds = false);
 
   void markSynced(const std::string& bookPath, int spine, int page);
 
@@ -77,9 +77,9 @@ class KOReaderAutoSync {
   static DocumentMatchMethod effectiveMatchMethod(const std::string& epubPath);
   static std::string documentHashFor(const std::string& epubPath);
 
-  static bool pullEnabled();
-  static bool sleepPushEnabled();
-  static bool intervalPushEnabled();
+  static bool pullEnabled(bool opds = false);
+  static bool sleepPushEnabled(bool opds = false);
+  static bool intervalPushEnabled(bool opds = false);
 
   static uint64_t pushSilentAsync(const std::string& epubPath, const KOReaderPosition& localKoPos, int spine, int page,
                                   const std::string& title = "", const std::string& authors = "");

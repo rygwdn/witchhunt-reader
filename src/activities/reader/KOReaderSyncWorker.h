@@ -12,6 +12,8 @@
 struct KOReaderSyncJob {
   enum Kind { FETCH_PROGRESS, SILENT_PUSH };
   Kind kind = FETCH_PROGRESS;
+  // Set for OPDS-progress jobs: path is the book, primaryHash/remote carry the OPDS record fields.
+  bool opds = false;
 
   std::string primaryHash;
   std::string altHash;

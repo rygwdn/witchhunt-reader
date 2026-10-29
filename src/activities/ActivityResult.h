@@ -60,6 +60,12 @@ struct PercentResult {
   int percent = 0;
 };
 
+// The remote OPDS progression the reader offered to resume from.
+struct OpdsProgressResult {
+  float progression = 0;
+  std::string reference;
+};
+
 struct PrintedPageResult {
   std::string label;
 };
@@ -111,9 +117,10 @@ struct ConfirmResult {
   bool alternate = false;
 };
 
-using ResultVariant = std::variant<std::monostate, WifiResult, KeyboardResult, MenuResult, ChapterResult, PercentResult,
-                                   PageResult, SyncResult, NetworkModeResult, FootnoteResult, FilePathResult,
-                                   StarredPageResult, PrintedPageResult, DictionarySwitchResult, ConfirmResult>;
+using ResultVariant =
+    std::variant<std::monostate, WifiResult, KeyboardResult, MenuResult, ChapterResult, PercentResult, PageResult,
+                 SyncResult, NetworkModeResult, FootnoteResult, FilePathResult, StarredPageResult, PrintedPageResult,
+                 DictionarySwitchResult, ConfirmResult, OpdsProgressResult>;
 
 struct ActivityResult {
   bool isCancelled = false;

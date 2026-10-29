@@ -27,6 +27,7 @@ class OpdsJsonParser {
     Navigation,
     Link,
     Links,
+    LinkProperties,
     Images,
     Image,
     Authors,
@@ -52,6 +53,7 @@ class OpdsJsonParser {
   size_t publicationBytes = 0;
   bool sawCollection = false;
   bool linkAcquisition = false;
+  bool linkProgression = false;
   bool linkNext = false;
   bool linkPrevious = false;
   bool linkSearch = false;
@@ -60,6 +62,8 @@ class OpdsJsonParser {
   OpdsEntry entry;
   std::string groupTitle, searchTemplate, nextPageUrl, prevPageUrl;
   std::string linkHref, linkType, linkTitle;
+  // Per-file progression href from a link's "properties" object (Bookorbit OPDS extension).
+  std::string fileProgressionHref;
   // A series name and its position arrive as siblings in either order; the
   // position is held until the series object closes so "Saga" + 2 always
   // composes to "Saga #2".
