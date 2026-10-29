@@ -58,7 +58,7 @@ void XtcReaderActivity::onEnter() {
   // (SerialTestApi::isTestBook).
   if (!SerialTestApi::isTestBook(xtc->getPath())) {
     globalReadingSessionTracker().begin(KOReaderDocumentId::calculateFromFilename(xtc->getPath()), xtc->getTitle(),
-                                        xtc->getAuthor());
+                                        xtc->getAuthor(), xtc->getPath());
   }
 
   // Trigger first update

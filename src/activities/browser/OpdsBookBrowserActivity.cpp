@@ -133,9 +133,9 @@ std::string readString(HalFile& f, bool& ok) {
 //   uint8_t  type (OpdsEntryType)
 //   u16+str  title | author | href | id | summary | imageHref
 //   int16    progressPercent
-//   u16+str  groupTitle | seriesTitle | seriesHref | progressionHref
+//   u16+str  groupTitle | seriesTitle | seriesHref | progressionHref | statsHref
 //   uint16_t numLinks
-//   per link: u16+str href | mimeType | formatKey | fileExtension | progressionHref
+//   per link: u16+str href | mimeType | formatKey | fileExtension | progressionHref | statsHref
 // All multi-byte integers are native-endian. The file is session-scoped and
 // never persisted across reboots, so no versioning is needed.
 void writeEntryToCache(HalFile& f, const OpdsEntry& entry) {
@@ -153,6 +153,7 @@ void writeEntryToCache(HalFile& f, const OpdsEntry& entry) {
   writeString(f, entry.seriesTitle);
   writeString(f, entry.seriesHref);
   writeString(f, entry.progressionHref);
+  writeString(f, entry.statsHref);
   uint16_t numLinks = entry.acquisitionLinks.size();
   f.write(reinterpret_cast<const uint8_t*>(&numLinks), sizeof(numLinks));
   for (const auto& link : entry.acquisitionLinks) {
@@ -160,6 +161,8 @@ void writeEntryToCache(HalFile& f, const OpdsEntry& entry) {
     writeString(f, link.mimeType);
     writeString(f, link.formatKey);
     writeString(f, link.fileExtension);
+    writeString(f, link.progressionHref);
+    writeString(f, link.statsHref);
   }
 }
 
@@ -182,6 +185,7 @@ OpdsEntry readEntryFromCache(HalFile& f) {
   entry.seriesTitle = readString(f, ok);
   entry.seriesHref = readString(f, ok);
   entry.progressionHref = readString(f, ok);
+  entry.statsHref = readString(f, ok);
   if (!ok) return {};
   uint16_t numLinks = 0;
   if (f.read(&numLinks, sizeof(numLinks)) != sizeof(numLinks)) return {};
@@ -194,6 +198,7 @@ OpdsEntry readEntryFromCache(HalFile& f) {
     link.formatKey = readString(f, ok);
     link.fileExtension = readString(f, ok);
     link.progressionHref = readString(f, ok);
+    link.statsHref = readString(f, ok);
     if (!ok) return {};
     entry.acquisitionLinks.push_back(std::move(link));
   }
@@ -895,9 +900,11 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
     if (!entry.imageHref.empty()) entry.imageHref = UrlUtils::buildUrl(url, entry.imageHref);
     if (!entry.seriesHref.empty()) entry.seriesHref = UrlUtils::buildUrl(url, entry.seriesHref);
     if (!entry.progressionHref.empty()) entry.progressionHref = UrlUtils::buildUrl(url, entry.progressionHref);
+    if (!entry.statsHref.empty()) entry.statsHref = UrlUtils::buildUrl(url, entry.statsHref);
     for (auto& acquisition : entry.acquisitionLinks) {
       if (!acquisition.progressionHref.empty())
         acquisition.progressionHref = UrlUtils::buildUrl(url, acquisition.progressionHref);
+      if (!acquisition.statsHref.empty()) acquisition.statsHref = UrlUtils::buildUrl(url, acquisition.statsHref);
     }
     if (entryOffsets.size() >= MAX_FEED_ENTRIES) {
       if (!feedCapped) {
@@ -1138,8 +1145,11 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book, const OpdsAcqu
     // Link the download to its server progression feed so the reader can sync. Entry-level href
     // is the fallback when the chosen format carries none of its own.
     const auto& progressHref = acquisition.progressionHref.empty() ? book.progressionHref : acquisition.progressionHref;
-    if (!progressHref.empty())
-      OpdsProgressSync::associate(filename, server, UrlUtils::buildUrl(server.url, progressHref));
+    const auto& statsHref = acquisition.statsHref.empty() ? book.statsHref : acquisition.statsHref;
+    if (!progressHref.empty() || !statsHref.empty())
+      OpdsProgressSync::associate(filename, server,
+                                  progressHref.empty() ? "" : UrlUtils::buildUrl(server.url, progressHref),
+                                  statsHref.empty() ? "" : UrlUtils::buildUrl(server.url, statsHref));
 
     // Clear any existing cache for this book just in case it's a redownload of
     // a previously opened book.

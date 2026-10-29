@@ -202,6 +202,9 @@ void OpdsParser::startElement(void* userData, const char* name, const char** att
       if (self->inEntry) {
         if (rel && strcmp(rel, "http://opds-spec.org/progression") == 0) {
           self->currentEntry.progressionHref = href;
+        } else if (rel && strcmp(rel, "https://bookorbit.app/rel/reading-stats") == 0 && type &&
+                   strcmp(type, "application/vnd.bookorbit.reading-stats+json") == 0) {
+          self->currentEntry.statsHref = href;
         } else if (rel && strstr(rel, "opds-spec.org/acquisition") != nullptr) {
           const bool directDownload = isDirectAcquisitionRel(rel);
           const auto acquisition = supportedAcquisitionLink(type, href, directDownload);

@@ -59,7 +59,8 @@ void LineReaderActivity::onEnter() {
   // file name; BookRelocation carries it over when the file is renamed. A device test's book is no history
   // (SerialTestApi::isTestBook).
   if (!SerialTestApi::isTestBook(filePath)) {
-    globalReadingSessionTracker().begin(KOReaderDocumentId::calculateFromFilename(filePath), title, details.author);
+    globalReadingSessionTracker().begin(KOReaderDocumentId::calculateFromFilename(filePath), title, details.author,
+                                        filePath);
   }
 
   // Trigger first update

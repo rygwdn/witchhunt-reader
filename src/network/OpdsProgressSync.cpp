@@ -16,6 +16,7 @@
 #include <memory>
 
 #include "CrossPointSettings.h"
+#include "OpdsStatsSync.h"
 #include "OpdsSyncPolicy.h"
 #include "util/UrlUtils.h"
 
@@ -84,14 +85,18 @@ bool write(const std::string& path, const JsonDocument& document) {
 }
 }  // namespace
 
-bool OpdsProgressSync::associate(const std::string& bookPath, const OpdsServer& server, const std::string& url) {
-  if (url.empty()) return false;
-  if (UrlUtils::extractHost(url) != UrlUtils::extractHost(server.url)) return false;
+bool OpdsProgressSync::associate(const std::string& bookPath, const OpdsServer& server, const std::string& url,
+                                 const std::string& statsUrl) {
+  if (url.empty() && statsUrl.empty()) return false;
+  if ((!url.empty() && UrlUtils::extractHost(url) != UrlUtils::extractHost(server.url)) ||
+      (!statsUrl.empty() && UrlUtils::extractHost(statsUrl) != UrlUtils::extractHost(server.url)))
+    return false;
   if (!Storage.ensureDirectoryExists((std::string(DIRECTORY) + "/links").c_str())) return false;
   JsonDocument document;
   document["server"] = server.url;
   document["username"] = server.username;
-  document["url"] = url;
+  if (!url.empty()) document["url"] = url;
+  if (!statsUrl.empty()) document["statsUrl"] = statsUrl;
   return write(pathFor(bookPath, "link"), document);
 }
 
@@ -163,6 +168,7 @@ bool OpdsProgressSync::flush(const OpdsServer& server, bool* failed) {
     if (failed) *failed = true;
     return false;
   }
+  OpdsStatsSync::flush(server);
   const auto accountPath = accountDirectory(server.url, server.username);
   auto directory = Storage.open(accountPath.c_str());
   if (!directory || !directory.isDirectory()) return false;
@@ -338,4 +344,16 @@ bool OpdsProgressSync::copyAssociation(const std::string& from, const std::strin
   const OutboxLock lock;
   JsonDocument mapping;
   return read(pathFor(from, "link"), mapping) && write(pathFor(to, "link"), mapping);
+}
+
+bool OpdsProgressSync::statsAssociation(const std::string& bookPath, StatsAssociation& association) {
+  const auto path = pathFor(bookPath, "link");
+  if (!Storage.exists(path.c_str()) && !Storage.exists((path + ".backup").c_str())) return false;
+  JsonDocument document;
+  if (!read(path, document)) return false;
+  association.server = document["server"].as<std::string>();
+  association.username = document["username"].as<std::string>();
+  association.url = document["statsUrl"].as<std::string>();
+  return !association.url.empty() &&
+         UrlUtils::extractHost(association.url) == UrlUtils::extractHost(association.server);
 }

@@ -30,7 +30,8 @@ class ReadingSessionTracker {
 
   // Start a session for `docId`. If a previous session is still open it is
   // flushed first under its own docId.
-  void begin(const std::string& docId, const std::string& title, const std::string& author);
+  void begin(const std::string& docId, const std::string& title, const std::string& author,
+             const std::string& bookPath = {});
 
   // Notify of any activity that should accumulate reading time. Typically
   // called from the reader's page-turn path. Safe to call before begin()
@@ -69,6 +70,13 @@ class ReadingSessionTracker {
   std::string docId;
   std::string title;
   std::string author;
+  // When set, a finished session is offered to the OPDS stats outbox under the book's own path.
+  std::string bookPath;
+  // Session identity for the server upload: a fresh UUID v4 per session and the millis() anchor
+  // used when HalClock had not yet synced at begin().
+  char sessionId[37] = {};
+  uint32_t sessionStartMs = 0;
+  int firstKnownProgress = -1;
 
   // Wall clock anchor at begin() — 0 if HalClock wasn't synced then.
   // We don't refresh this if HalClock becomes synced mid-session; we just

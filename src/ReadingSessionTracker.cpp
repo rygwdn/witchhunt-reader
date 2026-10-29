@@ -3,8 +3,10 @@
 #include <Arduino.h>  // millis()
 #include <HalClock.h>
 #include <Logging.h>
+#include <esp_random.h>
 
 #include "ReadingStats.h"
+#include "network/OpdsStatsSync.h"
 
 ReadingSessionTracker& globalReadingSessionTracker() {
   static ReadingSessionTracker instance;
@@ -21,7 +23,8 @@ void ReadingSessionTracker::flushIdleSinceLastActivity() {
   lastActivityMs = now;
 }
 
-void ReadingSessionTracker::begin(const std::string& docId_, const std::string& title_, const std::string& author_) {
+void ReadingSessionTracker::begin(const std::string& docId_, const std::string& title_, const std::string& author_,
+                                  const std::string& bookPath_) {
   if (active) {
     // Don't lose data from a previous session that wasn't explicitly closed.
     end();
@@ -30,6 +33,24 @@ void ReadingSessionTracker::begin(const std::string& docId_, const std::string& 
   docId = docId_;
   title = title_;
   author = author_;
+  bookPath = bookPath_;
+  uint8_t random[16];
+  for (unsigned i = 0; i < 16; i += 4) {
+    const uint32_t value = esp_random();
+    for (unsigned j = 0; j < 4; ++j) random[i + j] = static_cast<uint8_t>(value >> (j * 8));
+  }
+  random[6] = (random[6] & 0x0f) | 0x40;
+  random[8] = (random[8] & 0x3f) | 0x80;
+  static constexpr char HEX_DIGITS[] = "0123456789abcdef";
+  unsigned cursor = 0;
+  for (unsigned i = 0; i < 16; ++i) {
+    if (i == 4 || i == 6 || i == 8 || i == 10) sessionId[cursor++] = '-';
+    sessionId[cursor++] = HEX_DIGITS[random[i] >> 4];
+    sessionId[cursor++] = HEX_DIGITS[random[i] & 15];
+  }
+  sessionId[cursor] = 0;
+  sessionStartMs = millis();
+  firstKnownProgress = -1;
   walltimeStartEpoch = HalClock::isSynced() ? static_cast<int64_t>(HalClock::now()) : 0;
   lastActivityMs = millis();
   accumulatedMs = 0;
@@ -46,6 +67,7 @@ void ReadingSessionTracker::onPageTurn() {
 
 void ReadingSessionTracker::updateProgress(uint8_t progress) {
   if (!active) return;
+  if (firstKnownProgress < 0) firstKnownProgress = progress;
   lastKnownProgress = progress;
 }
 
@@ -87,7 +109,21 @@ void ReadingSessionTracker::end() {
     }
   }
 
+  // Offer the session to the OPDS stats outbox: only when a book path was supplied (device-test
+  // books pass none), only real time, and only when the wall clock actually ran. The start
+  // anchor falls back to the millis() delta when HalClock synced only mid-session.
+  if (!bookPath.empty() && seconds && HalClock::isSynced()) {
+    const int64_t ended = static_cast<int64_t>(HalClock::now());
+    const int64_t started = walltimeStartEpoch > 0
+                                ? walltimeStartEpoch
+                                : ended - (static_cast<uint64_t>(millis() - sessionStartMs) + 999) / 1000;
+    OpdsStatsSync::queue(bookPath, {sessionId, started, ended, seconds, pagesTurnedThisSession, firstKnownProgress,
+                                    firstKnownProgress >= 0 ? lastKnownProgress : -1});
+  }
+
   active = false;
+  bookPath.clear();
+  sessionId[0] = 0;
   docId.clear();
   title.clear();
   author.clear();

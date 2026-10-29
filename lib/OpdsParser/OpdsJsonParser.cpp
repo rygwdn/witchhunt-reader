@@ -110,7 +110,8 @@ void OpdsJsonParser::start(bool array) {
     linkType.clear();
     linkTitle.clear();
     fileProgressionHref.clear();
-    linkAcquisition = linkProgression = linkNext = linkPrevious = linkSearch = false;
+    fileStatsHref.clear();
+    linkAcquisition = linkProgression = linkStats = linkNext = linkPrevious = linkSearch = false;
   } else if (parent == Context::Images && !array) {
     next = Context::Image;
     linkHref.clear();
@@ -154,6 +155,7 @@ void OpdsJsonParser::relation(const std::string& value) {
   linkAcquisition |= value == "acquisition" || value == "download" || value == "http://opds-spec.org/acquisition" ||
                      value == "http://opds-spec.org/acquisition/open-access";
   linkProgression |= value == "http://opds-spec.org/progression";
+  linkStats |= value == "https://bookorbit.app/rel/reading-stats";
   linkNext |= value == "next";
   linkPrevious |= value == "previous" || value == "prev";
   linkSearch |= value == "search";
@@ -202,6 +204,8 @@ void OpdsJsonParser::value(const char* value, size_t size) {
       relation(text);
   } else if (context == Context::LinkProperties && name == "https://bookorbit.app/ns/progression")
     fileProgressionHref = text;
+  else if (context == Context::LinkProperties && name == "https://bookorbit.app/ns/reading-stats")
+    fileStatsHref = text;
   else if (context == Context::Image) {
     if (name == "href")
       linkHref = text;
@@ -220,11 +224,13 @@ void OpdsJsonParser::commitLink() {
     if (onEntryParsed) onEntryParsed(std::move(navigation));
   } else if (linkOwner == Context::Publication) {
     if (linkProgression) entry.progressionHref = linkHref;
+    if (linkStats && linkType == "application/vnd.bookorbit.reading-stats+json") entry.statsHref = linkHref;
     if (linkAcquisition && entry.acquisitionLinks.size() < 16) {
       OpdsAcquisitionLink link;
       link.href = linkHref;
       link.mimeType = linkType;
       link.progressionHref = fileProgressionHref;
+      link.statsHref = fileStatsHref;
       if (linkType == "application/epub+zip") {
         link.formatKey = "epub";
         link.fileExtension = ".epub";

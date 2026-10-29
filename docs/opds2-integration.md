@@ -1,9 +1,9 @@
 # OPDS 2.0 and progression: Bookorbit and Witchhunt
 
-This is stage 2 of the OPDS 2 work: the stage-1 JSON OPDS 2.0 catalog browsing
-plus reading-position (progression) sync for books downloaded from it. Reading
-stats and further reading-status handling arrive in the follow-up stage; this
-document covers only what these changes implement.
+This is stage 3 of the OPDS 2 work: the stage-1 JSON OPDS 2.0 catalog browsing
+plus stage-2 reading-position (progression) sync and reading stats for books
+downloaded from it. Further reading-status handling arrives in the follow-up
+stage; this document covers only what these changes implement.
 
 ## Connect
 
@@ -102,6 +102,46 @@ Two namespaced hints complement the standard document:
 Other clients can ignore these hints. Witchhunt follows ordinary OPDS feeds and
 publication progression links when they are absent.
 
+## Reading stats extension
+
+This is a Bookorbit extension advertised through OPDS, separate from the OPDS Progression draft. Publication links advertise:
+
+- `rel`: `https://bookorbit.app/rel/reading-stats`
+- `type`: `application/vnd.bookorbit.reading-stats+json`
+- `href`: `/api/v1/opds/{bookId}/stats`
+
+Acquisition-link `properties["https://bookorbit.app/ns/reading-stats"]` supplies the URL with `?fileId=...` for the exact downloaded file. Clients follow the advertised URL. Atom entries advertise the same publication-level relation and media type.
+
+POST with OPDS Basic authentication and that media type. The version 1 body contains `device: {id, name}` and `sessions`, with 1 to 16 immutable events:
+
+```json
+{
+  "version": 1,
+  "device": { "id": "urn:witchhunt:0123456789ab", "name": "Witchhunt Reader" },
+  "sessions": [
+    {
+      "id": "c38cbe7a-2051-42be-91e2-8571ba992825",
+      "started": "2026-01-01T12:00:00Z",
+      "ended": "2026-01-01T12:05:00Z",
+      "activeSeconds": 240,
+      "pagesTurned": 8,
+      "startProgression": 0.2,
+      "endProgression": 0.25
+    }
+  ]
+}
+```
+
+Session IDs are UUID v4; device IDs are URIs. Timestamps include a timezone. Durations are positive integer seconds, no greater than elapsed wall time; sessions span at most seven days. End times cannot be more than five minutes ahead. Pages turned are nonnegative integers (maximum 1,000,000); optional progress fractions are between 0 and 1. Payloads are limited to 32 KiB.
+
+A successful response is HTTP 200 with `{"version":1,"accepted":["session UUID", "..."]}` and the same media type. Identical retries are acknowledged without adding time again. IDs are scoped to the authenticated user and device. Reusing an ID with different data or a different file returns HTTP 409 and rolls back the entire batch. Clients delete only acknowledged events.
+
+The server bulk-inserts sessions and updates the existing reading-session/daily-totals system in one transaction, splitting totals at midnight in the user's timezone. There are no per-session SQL round trips. The source is `opds`; original device/session payloads, including pages turned, are retained in `reading_sessions.external_stats`. Existing reading-time reporting includes these sessions. Pages turned are retained for future reporting, with no new pages-turned chart in this change. Existing source-bucket reports group OPDS under Bookorbit.
+
+Stats ingestion never changes current progress or reading status. A stale/rejected position does not discard a valid reading session. This also prevents late historical stats from reopening a completed book.
+
+Witchhunt queues the tracker's idle-clamped active seconds and page turns at session close. Each completed session has a stable ID across retries. Its separate account-scoped outbox sends up to eight sessions per file per request and up to four requests before opening the catalog; one HTTP client reuses the connection during this pass. Only acknowledged sessions are removed. Stats upload runs independently of the progression outbox. Local reading history still works without a server association or a synchronized clock; server upload requires valid timestamps. There is no automatic historical backfill.
+
 ## Reading status
 
 Successful progression updates run Bookorbit's existing reading-status and
@@ -130,6 +170,7 @@ reader close. Reopening the OPDS catalog sends pending uploads before fetching
 the feed. The device records the time of the last position change, not
 reconnection time. Simply opening and closing a book does not produce a new
 position update. An unset device clock does not produce invented timestamps.
+Closing the reader also ends the stats session.
 
 The EPUB reader additionally offers **Sync > Fetch OPDS progress**. It displays
 the remote percentage, device, and timestamp, and asks before moving. Choosing
@@ -153,13 +194,15 @@ credentials, a KOReader document hash, or an XPath calculation.
 
 - **On close:** the existing auto-push-on-close setting and minimum session-page
   count apply on every board. The reader saves its pending position, ends the
-  reading session, releases its live section, and opens the foreground OPDS
+  stats session, releases its live section, and opens the foreground OPDS
   upload activity. The activity connects through the existing WiFi selector when
-  necessary. Success or cancellation returns Home; failures keep the outbox for
+  necessary. Success or cancellation returns Home; failures keep the outboxes for
   retry. Upload activities release a radio they started.
 - **On sleep and while reading:** the existing sleep-send preference, page
   interval, one-minute minimum interval, radio ownership checks, heap gates,
   status indicator, and shared network worker apply on S3 devices with PSRAM.
+  Closing/sleeping includes completed session stats; intervals send queued
+  events but do not cut the current stats session into artificial sessions.
   C3 retains its existing restriction to foreground close-time sync.
 - **On wake:** on S3 with PSRAM, the existing receive-on-wake preference fetches
   the associated OPDS position in the shared background worker. Positions within
@@ -171,9 +214,9 @@ credentials, a KOReader document hash, or an XPath calculation.
   newer positions may move backward for rereads. A missing remote position can
   trigger the existing upload path.
 - **Finished-book sync:** the existing finished-book sync toggle uploads the
-  queued completion for an associated EPUB. Its Home / next book / author search
-  destination is preserved. Moving the book to `/COMPLETED` copies the download
-  association so future rereading can still sync.
+  queued completion and stats for an associated EPUB. Its Home / next book /
+  author search destination is preserved. Moving the book to `/COMPLETED` copies
+  the download association so future rereading can still sync.
 
 Uploads drain the associated account's bounded outbox, including queued changes
 from other books in that account. The existing per-connection limits still
@@ -202,8 +245,8 @@ cover, also accepting PNG feeds now.
   dashboard's groups and facets are not representable in that cache, so the feed
   is fetched each time.
 - The per-entry cache file gains `progressPercent`, `groupTitle`, `seriesTitle`,
-  `seriesHref`, and `progressionHref` fields; readers of old cache files see a
-  missing or shifted tail as a miss and refetch.
+  `seriesHref`, `progressionHref`, and `statsHref` fields; readers of old cache
+  files see a missing or shifted tail as a miss and refetch.
 - One HTTP+TLS session (HttpDownloader::Session) is reused across the feed fetch,
   cover pages, and downloads in a browsing session, so the TLS handshake — the
   heap/CPU spike — runs once per host instead of per request. The session is
