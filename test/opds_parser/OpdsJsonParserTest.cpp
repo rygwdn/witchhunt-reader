@@ -178,3 +178,18 @@ TEST(OpdsSyncPolicy, WakePullToleratesLocalPageRoundingWithoutHidingADifferentPa
   EXPECT_FALSE(OpdsSyncPolicy::sameReadingPage(0.495f, 0.505f, 0.48f, 0.001f));
   EXPECT_FALSE(OpdsSyncPolicy::sameReadingPage(0.495f, 0.505f, 0.52f, 0.001f));
 }
+
+TEST(OpdsJsonParser, DiscoversStatsEndpointAndKeepsFileHintsSeparate) {
+  OpdsJsonParser parser;
+  std::vector<OpdsEntry> entries;
+  parser.onEntryParsed = [&](OpdsEntry entry) { entries.push_back(std::move(entry)); };
+  feed(
+      parser,
+      R"({"publications":[{"metadata":{"title":"Book"},"links":[{"rel":"https://bookorbit.app/rel/reading-stats","type":"application/vnd.bookorbit.reading-stats+json","href":"/stats"},{"rel":"acquisition","type":"application/epub+zip","href":"/book.epub","properties":{"https://bookorbit.app/ns/reading-stats":"/stats?fileId=12"}},{"rel":"acquisition","type":"text/plain","href":"/book.txt","properties":{"https://bookorbit.app/ns/reading-stats":"/stats?fileId=13"}}]}]})");
+  ASSERT_TRUE(parser.finish());
+  ASSERT_EQ(entries.size(), 1u);
+  EXPECT_EQ(entries[0].statsHref, "/stats");
+  ASSERT_EQ(entries[0].acquisitionLinks.size(), 2u);
+  EXPECT_EQ(entries[0].acquisitionLinks[0].statsHref, "/stats?fileId=12");
+  EXPECT_EQ(entries[0].acquisitionLinks[1].statsHref, "/stats?fileId=13");
+}

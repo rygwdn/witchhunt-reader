@@ -782,7 +782,7 @@ void EpubReaderActivity::onEnter() {
   // accumulate going forward. A device test's book is no history (SerialTestApi::isTestBook).
   if (const std::string& bookPath = epub->getPath(); !SerialTestApi::isTestBook(bookPath)) {
     globalReadingSessionTracker().begin(KOReaderDocumentId::calculateFromFilename(bookPath), epub->getTitle(),
-                                        epub->getAuthor());
+                                        epub->getAuthor(), bookPath);
   }
   // Bookmarks + recent-books overrides + the stats session. These are the loads a wake
   // shortcut would most plausibly skip or cache in RTC, so they get their own bucket.

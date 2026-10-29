@@ -587,3 +587,12 @@ TEST(OpdsParser, BuyLinkAloneIsNotListed) {
   const auto entries = parseFeed(xml, parser);
   EXPECT_TRUE(entries.empty());
 }
+
+TEST(OpdsParser, DiscoversAdvertisedStatsLink) {
+  const std::string xml =
+      R"(<feed xmlns="http://www.w3.org/2005/Atom"><entry><title>Book</title><id>7</id><link rel="https://bookorbit.app/rel/reading-stats" type="application/vnd.bookorbit.reading-stats+json" href="/stats"/><link rel="http://opds-spec.org/acquisition" type="application/epub+zip" href="/book.epub"/></entry></feed>)";
+  OpdsParser parser;
+  const auto entries = parseFeed(xml.c_str(), parser);
+  ASSERT_EQ(entries.size(), 1u);
+  EXPECT_EQ(entries[0].statsHref, "/stats");
+}

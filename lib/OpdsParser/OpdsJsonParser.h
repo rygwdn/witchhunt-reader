@@ -54,6 +54,7 @@ class OpdsJsonParser {
   bool sawCollection = false;
   bool linkAcquisition = false;
   bool linkProgression = false;
+  bool linkStats = false;
   bool linkNext = false;
   bool linkPrevious = false;
   bool linkSearch = false;
@@ -64,6 +65,7 @@ class OpdsJsonParser {
   std::string linkHref, linkType, linkTitle;
   // Per-file progression href from a link's "properties" object (Bookorbit OPDS extension).
   std::string fileProgressionHref;
+  std::string fileStatsHref;
   // A series name and its position arrive as siblings in either order; the
   // position is held until the series object closes so "Saga" + 2 always
   // composes to "Saga #2".
