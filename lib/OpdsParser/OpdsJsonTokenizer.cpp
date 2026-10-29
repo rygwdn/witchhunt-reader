@@ -175,7 +175,14 @@ void OpdsJsonTokenizer::feed(const char* data, size_t count) {
           if (truncated) {
             size_t boundary = length;
             while (boundary && (static_cast<unsigned char>(token[boundary - 1]) & 0xc0) == 0x80) --boundary;
-            if (boundary && static_cast<unsigned char>(token[boundary - 1]) >= 0xc0) length = boundary - 1;
+            if (boundary && static_cast<unsigned char>(token[boundary - 1]) >= 0xc0) {
+              // A lead byte ends the kept prefix. Count the continuation bytes that
+              // followed it: a complete trailing character survives the cap; only a
+              // partial sequence is dropped.
+              const unsigned char lead = static_cast<unsigned char>(token[boundary - 1]);
+              const size_t expected = lead >= 0xf0 ? 3 : lead >= 0xe0 ? 2 : 1;
+              if (length - boundary < expected) length = boundary - 1;
+            }
           }
           token[length] = 0;
           if (key) {

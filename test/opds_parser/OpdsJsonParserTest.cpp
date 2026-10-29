@@ -19,7 +19,7 @@ TEST(OpdsJsonParser, StreamsDashboardWithSeriesProgressAndUnicode) {
       parser,
       R"({"metadata":{"title":"Dashboard"},"links":[{"rel":["next"],"href":"?page=2"},{"rel":"search","href":"search{?query}","type":"application/opds+json"}],"groups":[{"metadata":{"title":"Up Next"},"publications":[{"metadata":{"title":"Caf\u00e9 \ud83d\udcd6","identifier":"urn:book:7","author":[{"name":"Ada"},"Bob"],"belongsTo":{"series":{"name":"Saga","position":2,"links":[{"href":"/series/9"}]}},"https://bookorbit.app/ns/readingProgress":0.42},"images":[{"href":"/cover.jpg","type":"image/jpeg"}],"links":[{"href":"/book.epub","rel":["acquisition"],"type":"application/epub+zip"}]}]},{"metadata":{"title":"Browse"},"navigation":[{"title":"All books","href":"/all"}]}]})");
   ASSERT_TRUE(parser.finish());
-  ASSERT_EQ(entries.size(), 3u);
+  ASSERT_EQ(entries.size(), 2u);
   EXPECT_EQ(entries[0].title, "Café 📖");
   EXPECT_EQ(entries[0].author, "Ada, Bob");
   EXPECT_EQ(entries[0].groupTitle, "Up Next");
@@ -41,8 +41,8 @@ TEST(OpdsJsonParser, StreamsDashboardWithSeriesProgressAndUnicode) {
 // position has to wait for the series object to close.
 TEST(OpdsJsonParser, ComposesSeriesLabelForBothKeyOrders) {
   const char* bodies[] = {
-      R"({"publications":[{"metadata":{"title":"A","belongsTo":{"series":{"position":2,"name":"Saga"}}}}]})",
-      R"({"publications":[{"metadata":{"title":"A","belongsTo":{"series":{"name":"Saga","position":2}}}}]})",
+      R"({"publications":[{"metadata":{"title":"A","belongsTo":{"series":{"position":2,"name":"Saga"}}},"links":[{"type":"application/epub+zip","rel":"acquisition","href":"a.epub"}]}]})",
+      R"({"publications":[{"metadata":{"title":"A","belongsTo":{"series":{"name":"Saga","position":2}}},"links":[{"type":"application/epub+zip","rel":"acquisition","href":"a.epub"}]}]})",
   };
   for (const std::string body : bodies) {
     OpdsJsonParser parser;
@@ -56,7 +56,9 @@ TEST(OpdsJsonParser, ComposesSeriesLabelForBothKeyOrders) {
   OpdsJsonParser parser;
   OpdsEntry result;
   parser.onEntryParsed = [&](OpdsEntry entry) { result = std::move(entry); };
-  feed(parser, R"({"publications":[{"metadata":{"title":"A","belongsTo":{"series":{"name":"Saga"}}}}]})");
+  feed(
+      parser,
+      R"({"publications":[{"metadata":{"title":"A","belongsTo":{"series":{"name":"Saga"}}},"links":[{"type":"application/epub+zip","rel":"acquisition","href":"a.epub"}]}]})");
   ASSERT_TRUE(parser.finish());
   EXPECT_EQ(result.seriesTitle, "Saga");
 }
@@ -98,9 +100,11 @@ TEST(OpdsJsonParser, TruncatesLongDescriptionsAndCarriesProgressPercent) {
   OpdsJsonParser parser;
   OpdsEntry result;
   parser.onEntryParsed = [&](OpdsEntry entry) { result = std::move(entry); };
-  feed(parser, "{\"publications\":[{\"metadata\":{\"title\":\"A\",\"https://bookorbit.app/ns/"
-               "readingProgress\":0.42,\"description\":\"" +
-                   std::string(10000, 'a') + "\"}}]}");
+  feed(parser,
+       "{\"publications\":[{\"metadata\":{\"title\":\"A\",\"https://bookorbit.app/ns/"
+       "readingProgress\":0.42,\"description\":\"" +
+           std::string(10000, 'a') +
+           "\"},\"links\":[{\"type\":\"application/epub+zip\",\"rel\":\"acquisition\",\"href\":\"a.epub\"}]}]}");
   ASSERT_TRUE(parser.finish());
   EXPECT_EQ(result.progressPercent, 42);
   EXPECT_LE(result.summary.size(), 4095u);
@@ -117,4 +121,26 @@ TEST(OpdsJsonParser, ExposesFacetLinksAsNavigableEntries) {
   ASSERT_EQ(entries.size(), 1u);
   EXPECT_EQ(entries[0].title, "Recent");
   EXPECT_EQ(entries[0].href, "?sort=recent");
+}
+
+TEST(OpdsJsonParser, TruncationKeepsCompleteTrailingUtf8AndDropsOnlyPartialSequences) {
+  OpdsJsonParser parser;
+  OpdsEntry result;
+  parser.onEntryParsed = [&](OpdsEntry entry) { result = std::move(entry); };
+  // The 4095-byte token cap lands exactly after a complete two-byte character;
+  // the boundary cleanup must keep that character, not rewind over it.
+  feed(parser, "{\"publications\":[{\"metadata\":{\"title\":\"A\",\"description\":\"" + std::string(4093, 'a') +
+                   "\xC3\xA9tail\"},\"links\":[{\"type\":\"application/"
+                   "epub+zip\",\"rel\":\"acquisition\",\"href\":\"a.epub\"}]}]}");
+  ASSERT_TRUE(parser.finish());
+  EXPECT_EQ(result.summary, std::string(4093, 'a') + "\xC3\xA9");
+
+  // A partial trailing sequence is still dropped whole, lead byte included.
+  OpdsJsonParser partial;
+  partial.onEntryParsed = [&](OpdsEntry entry) { result = std::move(entry); };
+  feed(partial, "{\"publications\":[{\"metadata\":{\"title\":\"A\",\"description\":\"" + std::string(4094, 'a') +
+                    "\xC3\xA9tail\"},\"links\":[{\"type\":\"application/"
+                    "epub+zip\",\"rel\":\"acquisition\",\"href\":\"a.epub\"}]}]}");
+  ASSERT_TRUE(partial.finish());
+  EXPECT_EQ(result.summary, std::string(4094, 'a'));
 }

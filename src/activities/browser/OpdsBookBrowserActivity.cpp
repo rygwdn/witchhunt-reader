@@ -927,9 +927,9 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
     };
     if (!httpSession) httpSession = std::make_unique<HttpDownloader::Session>();
     const bool sameOrigin = UrlUtils::extractHost(url) == UrlUtils::extractHost(server.url);
-    const HttpDownloader::DownloadError fetched = HttpDownloader::fetchUrl(
-        *httpSession, url, consume, sameOrigin ? server.username : "", sameOrigin ? server.password : "",
-        catalogTlsPolicy());
+    const HttpDownloader::DownloadError fetched =
+        HttpDownloader::fetchUrl(*httpSession, url, consume, sameOrigin ? server.username : "",
+                                 sameOrigin ? server.password : "", catalogTlsPolicy());
     if (fetched != HttpDownloader::OK) {
       state = BrowserState::ERROR;
       errorMessage = fetched == HttpDownloader::AUTH_ERROR ? tr(STR_AUTH_FAILED) : tr(STR_FETCH_FEED_FAILED);
@@ -1160,8 +1160,7 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book, const OpdsAcqu
               }
               return !mappedInput.wasPressed(MappedInputManager::Button::Back);
             },
-            coverSameOrigin ? server.username : "", coverSameOrigin ? server.password : "",
-            catalogTlsPolicy());
+            coverSameOrigin ? server.username : "", coverSameOrigin ? server.password : "", catalogTlsPolicy());
         buttonEvents.drain();
         if (coverDlResult != HttpDownloader::OK) {
           LOG_ERR("OPDS", "Failed to download cover from %s (err %d)", coverUrl.c_str(), (int)coverDlResult);
@@ -1244,9 +1243,8 @@ void OpdsBookBrowserActivity::fetchCoverForEntry(const OpdsEntry& entry) {
 
   if (!httpSession) httpSession = std::make_unique<HttpDownloader::Session>();
   const bool sameOrigin = UrlUtils::extractHost(coverUrl) == UrlUtils::extractHost(server.url);
-  if (HttpDownloader::downloadToFile(*httpSession, coverUrl, OPDS_COVER_JPG, nullptr,
-                                     sameOrigin ? server.username : "", sameOrigin ? server.password : "",
-                                     catalogTlsPolicy()) != HttpDownloader::OK) {
+  if (HttpDownloader::downloadToFile(*httpSession, coverUrl, OPDS_COVER_JPG, nullptr, sameOrigin ? server.username : "",
+                                     sameOrigin ? server.password : "", catalogTlsPolicy()) != HttpDownloader::OK) {
     LOG_DBG("OPDS", "Cover download failed");
     return;
   }
@@ -1297,8 +1295,8 @@ void OpdsBookBrowserActivity::prepareCoverPage() {
     if (Storage.exists(destination.c_str())) continue;
     const bool sameOrigin = UrlUtils::extractHost(entry.imageHref) == UrlUtils::extractHost(server.url);
     if (HttpDownloader::downloadToFile(*httpSession, entry.imageHref, OPDS_COVER_JPG, nullptr,
-                                       sameOrigin ? server.username : "", sameOrigin ? server.password : "") !=
-        HttpDownloader::OK)
+                                       sameOrigin ? server.username : "", sameOrigin ? server.password : "",
+                                       catalogTlsPolicy()) != HttpDownloader::OK)
       continue;
     HalFile source, target;
     if (Storage.openFileForRead("OPDS", OPDS_COVER_JPG, source) &&

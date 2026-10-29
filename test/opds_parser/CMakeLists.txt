@@ -33,6 +33,7 @@ add_executable(OpdsJsonParserTest
 )
 
 target_include_directories(OpdsJsonParserTest PRIVATE
+  ${REPO_ROOT}/test/shims
   ${REPO_ROOT}/lib/OpdsParser
   ${REPO_ROOT}/lib/JsonParser
   ${REPO_ROOT}/lib/Logging
@@ -41,6 +42,7 @@ target_include_directories(OpdsJsonParserTest PRIVATE
 target_link_libraries(OpdsJsonParserTest PRIVATE
   crosspoint_test_common
   GTest::gtest_main
+  SaxParser
 )
 
 gtest_discover_tests(OpdsJsonParserTest)
