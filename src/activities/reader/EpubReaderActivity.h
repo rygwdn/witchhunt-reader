@@ -34,6 +34,7 @@
 #include "activities/Activity.h"
 #include "components/themes/BaseTheme.h"
 #include "components/themes/TapTargets.h"
+#include "network/OpdsProgressSync.h"
 
 class EpubReaderActivity final : public Activity {
   // Reader can launch sync in several UX modes:
@@ -691,6 +692,13 @@ class EpubReaderActivity final : public Activity {
   // inspection of a book should not trigger a network round-trip. Reset on every reader
   // entry; not persisted, since "session" means the lifetime of this activity instance.
   int sessionPagesAdvanced = 0;
+  bool opdsSyncAssociated_ = false;
+  void queueOpdsProgress();
+  void launchOpdsProgress(const OpdsProgressSync::Remote* cached = nullptr);
+  // The finished-book screen queued a completion (1.0): retire any snapshot this
+  // session still holds, so closing the reader cannot queue an older fractional
+  // position over the completion.
+  void retireOpdsProgressSnapshot() { opdsProgressDirty_ = false; }
 
 #if CROSSPOINT_KOREADER_AUTOSYNC
   bool autoSyncPullPending = false;
@@ -709,6 +717,10 @@ class EpubReaderActivity final : public Activity {
   bool pollAutoSyncPull();
   bool evaluateAutoSyncPull();
   bool handOffToInteractiveSync();
+  // An OPDS wake pull that differs: held between evaluateAutoSyncPull() (under the render lock)
+  // and pollAutoSyncPull() launching the screen after the lock releases.
+  OpdsProgressSync::Remote opdsPullRemote_;
+  bool opdsPullPending_ = false;
   void silentUploadCurrentPosition();
   void silentApplyRemote(const KOReaderProgress& remote);
   void maybeAutoPushInterval();
@@ -1061,6 +1073,11 @@ class EpubReaderActivity final : public Activity {
   // loop()'s idle branch: asks again for an owed minute-tick refresh once the reader has settled.
   void serviceOwedPeriodicRefresh();
   bool maybeRestartForFragmentedHeap(uint32_t freeHeap, uint32_t contigHeap);
+  int opdsSavedSpine_ = -1, opdsSavedPage_ = -1;
+  int64_t opdsReadAt_ = 0;
+  bool opdsProgressDirty_ = false;
+  float opdsProgress_ = 0;
+  int opdsSpine_ = 0;
   // The page save render() posted and loop() has not written yet, written now unless the book is finished: for
   // onExit() and a restart to the reader when they do not save the live position.
   void writeOwedPageSave();
@@ -1083,10 +1100,10 @@ class EpubReaderActivity final : public Activity {
                                        uint8_t percent, std::optional<uint16_t> paragraphIndex = std::nullopt,
                                        const std::optional<EpubProgressRecord::Shown>& shown = std::nullopt);
   // Jump to a percentage of the book (0-100), mapping it to spine and page.
-  void jumpToPercent(int percent);
+  void jumpToPercent(float percent);
   // The spine and the position within it that `percent` (0-100) of the book falls on. False
   // when the book has no size or spines to measure.
-  bool resolvePercent(int percent, int& targetSpineIndex, float& spineProgress) const;
+  bool resolvePercent(float percent, int& targetSpineIndex, float& spineProgress) const;
   void onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction action);
 
   // Open word selection over the current page, or the dictionary picker when no

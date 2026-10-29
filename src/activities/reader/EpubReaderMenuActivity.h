@@ -39,6 +39,7 @@ class EpubReaderMenuActivity final : public TabbedUiListActivity {
     DISPLAY_QR,
     GO_HOME,
     PULL_REMOTE,
+    OPDS_PROGRESS,
     PUSH_LOCAL,
     COMPARE_REMOTE,
     STARRED_PAGES,
@@ -62,7 +63,8 @@ class EpubReaderMenuActivity final : public TabbedUiListActivity {
                                   const int8_t initialFontSizeNormalizationOverride,
                                   const int8_t initialInlineFootnotePreviewsOverride,
                                   const int8_t initialLineSpacingOverride, const bool hasStarredPages,
-                                  const bool isCurrentPageStarred, const bool hasPrintedPages);
+                                  const bool isCurrentPageStarred, const bool hasPrintedPages,
+                                  const bool hasOpdsProgression = false);
 
   void onExit() override;
 
@@ -70,13 +72,14 @@ class EpubReaderMenuActivity final : public TabbedUiListActivity {
   enum class MenuTab : uint8_t { Navigation, Settings, Sync, Tools, Count };
   static constexpr size_t MENU_TAB_COUNT = static_cast<size_t>(MenuTab::Count);
 
-  void buildMenuItems(bool hasFootnotes, bool hasStarredPages, bool hasPrintedPages);
+  void buildMenuItems(bool hasFootnotes, bool hasStarredPages, bool hasPrintedPages, bool hasOpdsProgression);
   [[nodiscard]] MenuTab activeTab() const { return visibleTabs[selectedTab()]; }
   [[nodiscard]] size_t activeTabIndex() const { return static_cast<size_t>(activeTab()); }
   [[nodiscard]] std::vector<SettingInfo>& activeMenuItems() { return tabMenuItems[activeTabIndex()]; }
   [[nodiscard]] const std::vector<SettingInfo>& activeMenuItems() const { return tabMenuItems[activeTabIndex()]; }
 
   bool currentPageStarred = false;
+  bool hasOpdsProgression_ = false;
   void finishWithAction(MenuAction action);
 
   // UiListActivity / TabbedUiListActivity overrides

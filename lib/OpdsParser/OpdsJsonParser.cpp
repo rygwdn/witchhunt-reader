@@ -109,12 +109,15 @@ void OpdsJsonParser::start(bool array) {
     linkHref.clear();
     linkType.clear();
     linkTitle.clear();
-    linkAcquisition = linkNext = linkPrevious = linkSearch = false;
+    fileProgressionHref.clear();
+    linkAcquisition = linkProgression = linkNext = linkPrevious = linkSearch = false;
   } else if (parent == Context::Images && !array) {
     next = Context::Image;
     linkHref.clear();
     linkType.clear();
-  } else if (parent == Context::Link && name == "rel" && array)
+  } else if (parent == Context::Link && name == "properties" && !array)
+    next = Context::LinkProperties;
+  else if (parent == Context::Link && name == "rel" && array)
     next = Context::Link;
   frames[depth].context = next;
   frames[depth].key.clear();
@@ -150,6 +153,7 @@ void OpdsJsonParser::end(bool array) {
 void OpdsJsonParser::relation(const std::string& value) {
   linkAcquisition |= value == "acquisition" || value == "download" || value == "http://opds-spec.org/acquisition" ||
                      value == "http://opds-spec.org/acquisition/open-access";
+  linkProgression |= value == "http://opds-spec.org/progression";
   linkNext |= value == "next";
   linkPrevious |= value == "previous" || value == "prev";
   linkSearch |= value == "search";
@@ -196,7 +200,9 @@ void OpdsJsonParser::value(const char* value, size_t size) {
       linkTitle = text;
     else if (name == "rel" || name.empty())
       relation(text);
-  } else if (context == Context::Image) {
+  } else if (context == Context::LinkProperties && name == "https://bookorbit.app/ns/progression")
+    fileProgressionHref = text;
+  else if (context == Context::Image) {
     if (name == "href")
       linkHref = text;
     else if (name == "type")
@@ -213,10 +219,12 @@ void OpdsJsonParser::commitLink() {
     navigation.groupTitle = groupTitle;
     if (onEntryParsed) onEntryParsed(std::move(navigation));
   } else if (linkOwner == Context::Publication) {
+    if (linkProgression) entry.progressionHref = linkHref;
     if (linkAcquisition && entry.acquisitionLinks.size() < 16) {
       OpdsAcquisitionLink link;
       link.href = linkHref;
       link.mimeType = linkType;
+      link.progressionHref = fileProgressionHref;
       if (linkType == "application/epub+zip") {
         link.formatKey = "epub";
         link.fileExtension = ".epub";

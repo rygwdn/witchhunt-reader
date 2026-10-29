@@ -249,6 +249,20 @@ TEST(OpdsParser, SlashVariantHrefAcquisitionLinksAreDeduplicated) {
   ASSERT_EQ(links[0].href, "/books/example.epub");
 }
 
+// The entry-level progression link carries the reading-position feed. It shares the rel space
+// with acquisition links and must land on its own field, not be swallowed as a download.
+TEST(OpdsParser, CapturesEntryProgressionLink) {
+  const std::string xml =
+      R"(<feed xmlns="http://www.w3.org/2005/Atom"><entry><title>Book</title><id>7</id><link rel="http://opds-spec.org/progression" type="text/plain" href="/progress?book=7"/><link rel="http://opds-spec.org/acquisition" type="application/epub+zip" href="/book.epub"/></entry></feed>)";
+  OpdsParser parser;
+  const auto entries = parseFeed(xml.c_str(), parser);
+  ASSERT_TRUE(!parser.error());
+  ASSERT_EQ(entries.size(), static_cast<size_t>(1));
+  EXPECT_EQ(entries[0].progressionHref, "/progress?book=7");
+  ASSERT_EQ(entries[0].acquisitionLinks.size(), static_cast<size_t>(1));
+  EXPECT_EQ(entries[0].acquisitionLinks[0].formatKey, "epub");
+}
+
 // A translator or illustrator listed after the author must not replace them: the name is shown in
 // the list and goes into the download's file name.
 TEST(OpdsParser, FirstAuthorIsKept) {

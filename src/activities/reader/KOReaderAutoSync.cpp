@@ -14,6 +14,8 @@
 #include "KOReaderDocumentId.h"
 #include "KOReaderSyncMetadata.h"
 #include "KOReaderSyncWorker.h"
+#include "network/OpdsProgressSync.h"
+#include "network/OpdsSyncPolicy.h"
 
 AutoSyncState AutoSyncState::instance;
 
@@ -36,7 +38,8 @@ KOReaderSyncJob buildSilentPushJob(const std::string& epubPath, const KOReaderPo
   job.path = epubPath;
   job.spine = spine;
   job.page = page;
-  job.progress.document = KOReaderAutoSync::documentHashFor(epubPath);
+  job.opds = OpdsProgressSync::associated(epubPath);
+  if (!job.opds) job.progress.document = KOReaderAutoSync::documentHashFor(epubPath);
   job.progress.progress = localKoPos.xpath;
   job.progress.percentage = localKoPos.percentage;
   if (KOREADER_STORE.getSendMetadata()) {
@@ -99,8 +102,8 @@ bool AutoSyncState::isPositionSynced(const std::string& bookPath, const int spin
   return !lastDocPath.empty() && bookPath == lastDocPath && spine == lastPushedSpine && page == lastPushedPage;
 }
 
-void AutoSyncState::noteProgress(const std::string& bookPath, const int spine, const int page) {
-  if (!KOReaderAutoSync::sleepPushEnabled() && !KOReaderAutoSync::intervalPushEnabled()) {
+void AutoSyncState::noteProgress(const std::string& bookPath, const int spine, const int page, const bool opds) {
+  if (!KOReaderAutoSync::sleepPushEnabled(opds) && !KOReaderAutoSync::intervalPushEnabled(opds)) {
     return;
   }
   lastNoteWasTurnFlag = spine != lastSeenSpine || page != lastSeenPage;
@@ -108,7 +111,7 @@ void AutoSyncState::noteProgress(const std::string& bookPath, const int spine, c
     lastSeenSpine = spine;
     lastSeenPage = page;
 
-    if (KOReaderAutoSync::intervalPushEnabled()) {
+    if (KOReaderAutoSync::intervalPushEnabled(opds)) {
       turnsSincePush++;
       dirty = true;
     }
@@ -176,25 +179,30 @@ bool KOReaderAutoSync::heapAllowsBackgroundSession(const char* what) {
   return true;
 }
 
-bool KOReaderAutoSync::pullEnabled() { return KOREADER_STORE.hasCredentials() && KOREADER_STORE.getSyncOnWake(); }
+bool KOReaderAutoSync::pullEnabled(const bool opds) {
+  return OpdsSyncPolicy::automaticEnabled(KOREADER_STORE.hasCredentials(), opds, KOREADER_STORE.getSyncOnWake());
+}
 
-bool KOReaderAutoSync::sleepPushEnabled() { return KOREADER_STORE.hasCredentials() && KOREADER_STORE.getSyncOnSleep(); }
+bool KOReaderAutoSync::sleepPushEnabled(const bool opds) {
+  return OpdsSyncPolicy::automaticEnabled(KOREADER_STORE.hasCredentials(), opds, KOREADER_STORE.getSyncOnSleep());
+}
 
-bool KOReaderAutoSync::intervalPushEnabled() {
-  return KOREADER_STORE.hasCredentials() && KOREADER_STORE.getPushIntervalPages() > 0;
+bool KOReaderAutoSync::intervalPushEnabled(const bool opds) {
+  return OpdsSyncPolicy::automaticEnabled(KOREADER_STORE.hasCredentials(), opds,
+                                          KOREADER_STORE.getPushIntervalPages() > 0);
 }
 
 uint64_t KOReaderAutoSync::pushSilentAsync(const std::string& epubPath, const KOReaderPosition& localKoPos,
                                            const int spine, const int page, const std::string& title,
                                            const std::string& authors) {
-  if (!KOREADER_STORE.hasCredentials()) return 0;
+  if (!KOREADER_STORE.hasCredentials() && !OpdsProgressSync::associated(epubPath)) return 0;
   if (!heapAllowsBackgroundSession("Silent push")) return 0;
   KOReaderSyncJob job = buildSilentPushJob(epubPath, localKoPos, spine, page, title, authors);
-  if (job.progress.document.empty()) {
+  if (!job.opds && job.progress.document.empty()) {
     LOG_ERR("AutoSync", "Document hash failed for %s", epubPath.c_str());
     return 0;
   }
-  if (job.progress.progress.empty()) {
+  if (!job.opds && job.progress.progress.empty()) {
     LOG_ERR("AutoSync", "Local mapping produced no xpath for %s; skipping push", epubPath.c_str());
     return 0;
   }
@@ -227,9 +235,9 @@ bool KOReaderAutoSync::finalizeSilentPush(const uint64_t seq) {
 
 bool KOReaderAutoSync::stashSleepPush(const std::string& epubPath, const KOReaderPosition& localKoPos, const int spine,
                                       const int page, const std::string& title, const std::string& authors) {
-  if (!KOREADER_STORE.hasCredentials()) return false;
+  if (!KOREADER_STORE.hasCredentials() && !OpdsProgressSync::associated(epubPath)) return false;
   KOReaderSyncJob job = buildSilentPushJob(epubPath, localKoPos, spine, page, title, authors);
-  if (job.progress.document.empty() || job.progress.progress.empty()) {
+  if (!job.opds && (job.progress.document.empty() || job.progress.progress.empty())) {
     return false;
   }
   job.connectTimeoutMs = SLEEP_PUSH_CONNECT_TIMEOUT_MS;

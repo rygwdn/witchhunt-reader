@@ -31,6 +31,7 @@
 #include "components/themes/ListTouchBand.h"
 #include "fontIds.h"
 #include "network/HttpDownloader.h"
+#include "network/OpdsProgressSync.h"
 #include "util/OpdsFilename.h"
 #include "util/StringUtils.h"
 #include "util/UrlUtils.h"
@@ -132,9 +133,9 @@ std::string readString(HalFile& f, bool& ok) {
 //   uint8_t  type (OpdsEntryType)
 //   u16+str  title | author | href | id | summary | imageHref
 //   int16    progressPercent
-//   u16+str  groupTitle | seriesTitle | seriesHref
+//   u16+str  groupTitle | seriesTitle | seriesHref | progressionHref
 //   uint16_t numLinks
-//   per link: u16+str href | mimeType | formatKey | fileExtension
+//   per link: u16+str href | mimeType | formatKey | fileExtension | progressionHref
 // All multi-byte integers are native-endian. The file is session-scoped and
 // never persisted across reboots, so no versioning is needed.
 void writeEntryToCache(HalFile& f, const OpdsEntry& entry) {
@@ -151,6 +152,7 @@ void writeEntryToCache(HalFile& f, const OpdsEntry& entry) {
   writeString(f, entry.groupTitle);
   writeString(f, entry.seriesTitle);
   writeString(f, entry.seriesHref);
+  writeString(f, entry.progressionHref);
   uint16_t numLinks = entry.acquisitionLinks.size();
   f.write(reinterpret_cast<const uint8_t*>(&numLinks), sizeof(numLinks));
   for (const auto& link : entry.acquisitionLinks) {
@@ -179,6 +181,7 @@ OpdsEntry readEntryFromCache(HalFile& f) {
   entry.groupTitle = readString(f, ok);
   entry.seriesTitle = readString(f, ok);
   entry.seriesHref = readString(f, ok);
+  entry.progressionHref = readString(f, ok);
   if (!ok) return {};
   uint16_t numLinks = 0;
   if (f.read(&numLinks, sizeof(numLinks)) != sizeof(numLinks)) return {};
@@ -190,6 +193,7 @@ OpdsEntry readEntryFromCache(HalFile& f) {
     link.mimeType = readString(f, ok);
     link.formatKey = readString(f, ok);
     link.fileExtension = readString(f, ok);
+    link.progressionHref = readString(f, ok);
     if (!ok) return {};
     entry.acquisitionLinks.push_back(std::move(link));
   }
@@ -734,6 +738,11 @@ void OpdsBookBrowserActivity::render(RenderLock&&) {
   const bool selectedIsBook = !entryOffsets.empty() && getEntry(selectorIndex).type == OpdsEntryType::BOOK;
   catalogList.drawHints(renderer, tr(STR_BACK), selectedIsBook ? tr(STR_DOWNLOAD) : tr(STR_OPEN));
 
+  if (progressConflict) {
+    auto warning = renderer.truncatedText(UI_10_FONT_ID, tr(STR_OPDS_PROGRESS_CONFLICT), body.width - 8);
+    renderer.drawText(UI_10_FONT_ID, body.x + 4, body.y - 16, warning.c_str());
+  }
+
   if (entryOffsets.empty()) {
     renderer.drawCenteredText(UI_10_FONT_ID, midY, tr(STR_NO_ENTRIES));
     renderer.displayBuffer();
@@ -850,6 +859,11 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
     memoryTrimmed = true;
   }
 
+  // Push this device's queued positions before pulling, so the server sees the reader's latest
+  // page when the catalog reports progress. True means the server had a newer record: the
+  // upload lost, and the warning below the header says where to fetch it.
+  progressConflict = OpdsProgressSync::flush(server);
+
   entryOffsets.clear();
   // Reserve up front so the per-entry push_back loop doesn't repeatedly realloc
   // (2x grow + copy) and fragment the heap mid-fetch. One page-ish worth covers
@@ -880,6 +894,11 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
     if (!entry.href.empty()) entry.href = UrlUtils::buildUrl(url, entry.href);
     if (!entry.imageHref.empty()) entry.imageHref = UrlUtils::buildUrl(url, entry.imageHref);
     if (!entry.seriesHref.empty()) entry.seriesHref = UrlUtils::buildUrl(url, entry.seriesHref);
+    if (!entry.progressionHref.empty()) entry.progressionHref = UrlUtils::buildUrl(url, entry.progressionHref);
+    for (auto& acquisition : entry.acquisitionLinks) {
+      if (!acquisition.progressionHref.empty())
+        acquisition.progressionHref = UrlUtils::buildUrl(url, acquisition.progressionHref);
+    }
     if (entryOffsets.size() >= MAX_FEED_ENTRIES) {
       if (!feedCapped) {
         feedCapped = true;
@@ -1115,6 +1134,12 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book, const OpdsAcqu
     downloadedFile.close();
 
     LOG_DBG("OPDS", "Download complete: %s", filename.c_str());
+
+    // Link the download to its server progression feed so the reader can sync. Entry-level href
+    // is the fallback when the chosen format carries none of its own.
+    const auto& progressHref = acquisition.progressionHref.empty() ? book.progressionHref : acquisition.progressionHref;
+    if (!progressHref.empty())
+      OpdsProgressSync::associate(filename, server, UrlUtils::buildUrl(server.url, progressHref));
 
     // Clear any existing cache for this book just in case it's a redownload of
     // a previously opened book.

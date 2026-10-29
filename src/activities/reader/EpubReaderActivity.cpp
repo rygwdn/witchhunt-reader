@@ -59,6 +59,7 @@
 #include "KOReaderCredentialStore.h"
 #include "KOReaderDocumentId.h"
 #include "MappedInputManager.h"
+#include "OpdsProgressActivity.h"
 #include "PreRenderGate.h"
 #include "QrDisplayActivity.h"
 #include "QuickOverridesActivity.h"
@@ -79,6 +80,7 @@
 #include "components/LinkMarkerMatch.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "network/OpdsProgressSync.h"
 #include "util/ScreenshotUtil.h"
 #include "util/SerialCommandGrammar.h"
 #include "util/WakeTrace.h"
@@ -786,12 +788,15 @@ void EpubReaderActivity::onEnter() {
   // shortcut would most plausibly skip or cache in RTC, so they get their own bucket.
   WakeTrace::mark(WakeTrace::Phase::StoresLoaded);
 
+  opdsSyncAssociated_ = OpdsProgressSync::associated(epub->getPath());
+
 #if CROSSPOINT_KOREADER_AUTOSYNC
-  if (KOReaderAutoSync::sleepPushEnabled() || KOReaderAutoSync::intervalPushEnabled()) {
+  if (KOReaderAutoSync::sleepPushEnabled(opdsSyncAssociated_) ||
+      KOReaderAutoSync::intervalPushEnabled(opdsSyncAssociated_)) {
     AUTOSYNC_STATE.seedLastSeen(
         currentSpineIndex, navTarget.kind == NavigationTarget::Kind::Page ? navTarget.page : navTarget.fallbackPage);
   }
-  autoSyncPullPending = KOReaderAutoSync::pullEnabled() && WakeTrace::isResume();
+  autoSyncPullPending = KOReaderAutoSync::pullEnabled(opdsSyncAssociated_) && WakeTrace::isResume();
   autoSyncIndicator = SyncIndicator::None;
   if (KOREADER_STORE.getShowSyncIndicator() && AUTOSYNC_STATE.lastSyncFailed()) {
     autoSyncIndicator = SyncIndicator::Failed;
@@ -921,6 +926,13 @@ void EpubReaderActivity::onExit() {
     epub->clearCache(*clearCacheOnExit_, /*preserveThumbs=*/true);
     // Reset: syncFromStore() above has just listed the bookmarks that went with the folder.
     if (*clearCacheOnExit_ == BookCache::Keep::Nothing) GLOBAL_BOOKMARKS.removeBySourcePath(epub->getPath());
+  }
+  // Closing the reader replays its last saved page into the OPDS outbox, unless the
+  // finished-book screen already queued a completion for this session (that retired
+  // the dirty flag, and OpdsProgressSync::queue also refuses to lower a queued 1.0).
+  if (epub && opdsProgressDirty_) {
+    OpdsProgressSync::queue(epub->getPath(), opdsProgress_, epub->getSpineItem(opdsSpine_).href, opdsReadAt_);
+    opdsProgressDirty_ = false;
   }
   epub.reset();
   currentPageFootnotes.clear();
@@ -1151,7 +1163,8 @@ void EpubReaderActivity::loop() {
 
       BookFinished::launchFinishedBookFlow(*this, renderer, mappedInput, epub->getPath(), epub->getSeries(),
                                            epub->getSeriesIndex(), epub->getAuthor(), nullptr, nullptr,
-                                           &EpubReaderActivity::onFinishedBookSyncRequested, this);
+                                           &EpubReaderActivity::onFinishedBookSyncRequested, this,
+                                           [this] { retireOpdsProgressSnapshot(); });
     } else {
       {
         RenderLock lock(*this);
@@ -2575,7 +2588,7 @@ void EpubReaderActivity::stepCurrentSectionBuild() {
 
 // Translate an absolute percent into a spine index plus a normalized position
 // within that spine so we can jump after the section is loaded.
-void EpubReaderActivity::jumpToPercent(const int percent) {
+void EpubReaderActivity::jumpToPercent(const float percent) {
   int targetSpineIndex = 0;
   float spineProgress = 0.0f;
   if (!resolvePercent(percent, targetSpineIndex, spineProgress)) {
@@ -2591,7 +2604,7 @@ void EpubReaderActivity::jumpToPercent(const int percent) {
   }
 }
 
-bool EpubReaderActivity::resolvePercent(int percent, int& targetSpineIndex, float& spineProgress) const {
+bool EpubReaderActivity::resolvePercent(float percent, int& targetSpineIndex, float& spineProgress) const {
   if (!epub) {
     return false;
   }
@@ -2601,13 +2614,15 @@ bool EpubReaderActivity::resolvePercent(int percent, int& targetSpineIndex, floa
     return false;
   }
 
-  // Normalize input to 0-100 to avoid invalid jumps.
-  percent = clampPercent(percent);
+  // Normalize input to 0-100 to avoid invalid jumps. A fractional percent comes
+  // from the OPDS progression (a float fraction times 100), so keep the precision.
+  percent = std::clamp(percent, 0.0f, 100.0f);
 
   // Convert percent into a byte-like absolute position across the spine sizes.
-  // Use an overflow-safe computation: (bookSize / 100) * percent + (bookSize % 100) * percent / 100
-  size_t targetSize =
-      (bookSize / 100) * static_cast<size_t>(percent) + (bookSize % 100) * static_cast<size_t>(percent) / 100;
+  // The percent is fractional (an OPDS progression maps here), so the integer
+  // split of the old int path would truncate it; a double product is exact for
+  // any book size that fits the device's SD card.
+  size_t targetSize = static_cast<size_t>(static_cast<double>(bookSize) * percent / 100.0);
   if (percent >= 100) {
     // Ensure the final percent lands inside the last spine item.
     targetSize = bookSize - 1;
@@ -2933,7 +2948,8 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
       }
       BookFinished::launchFinishedBookFlow(*this, renderer, mappedInput, epub->getPath(), epub->getSeries(),
                                            epub->getSeriesIndex(), epub->getAuthor(), nullptr, nullptr,
-                                           &EpubReaderActivity::onFinishedBookSyncRequested, this);
+                                           &EpubReaderActivity::onFinishedBookSyncRequested, this,
+                                           [this] { retireOpdsProgressSnapshot(); });
       return;
     }
     case EpubReaderMenuActivity::MenuAction::DELETE_CACHE: {
@@ -2970,6 +2986,10 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
         pendingScreenshot = true;
       }
       requestUpdate();
+      break;
+    }
+    case EpubReaderMenuActivity::MenuAction::OPDS_PROGRESS: {
+      launchOpdsProgress();
       break;
     }
     case EpubReaderMenuActivity::MenuAction::PULL_REMOTE: {
@@ -4163,7 +4183,7 @@ void EpubReaderActivity::serviceFinishedBookLaunch() {
   BookFinished::launchFinishedBookFlow(
       *this, renderer, mappedInput, epub->getPath(), epub->getSeries(), epub->getSeriesIndex(), epub->getAuthor(),
       [](void* ctx) { static_cast<EpubReaderActivity*>(ctx)->finishedBookActivityStarted_ = false; }, this,
-      &EpubReaderActivity::onFinishedBookSyncRequested, this);
+      &EpubReaderActivity::onFinishedBookSyncRequested, this, [this] { retireOpdsProgressSnapshot(); });
 }
 
 bool EpubReaderActivity::renderBufferDisplayPass(const RenderLayout& layout) {
@@ -5675,6 +5695,17 @@ void EpubReaderActivity::saveProgress(int spineIndex, int currentPage, int pageC
   // overwrites the stored per-book progress, so an unknown 0 at session end would regress it.
   if (pageCount > 0) {
     globalReadingSessionTracker().updateProgress(percent);
+    // The OPDS outbox snapshot: the whole-book fraction, the spine it came from, and when the
+    // position actually changed (a re-save of the same page must not refresh the timestamp the
+    // server compares).
+    opdsProgress_ = epub->calculateProgress(spineIndex, static_cast<float>(currentPage) / pageCount);
+    opdsSpine_ = spineIndex;
+    if (opdsSavedSpine_ >= 0 && (opdsSavedSpine_ != spineIndex || opdsSavedPage_ != currentPage)) {
+      opdsProgressDirty_ = true;
+      opdsReadAt_ = OpdsProgressSync::nowMilliseconds();
+    }
+    opdsSavedSpine_ = spineIndex;
+    opdsSavedPage_ = currentPage;
   }
   LOG_DBG("ERS", "Progress saved: Chapter %d, Page %d (%d%%)", spineIndex, currentPage, percent);
 }
@@ -7489,7 +7520,8 @@ void EpubReaderActivity::openReaderMenu() {
           bookSdFontFamilyOverride, bookFontSizeOverride, SETTINGS.textDarkness, bookBionicReadingOverride,
           bookGuideDotsOverride, bookParagraphAlignmentOverride, bookTextAntiAliasingOverride, bookHyphenationOverride,
           bookFontSizeNormalizationOverride, bookInlineFootnotePreviewsOverride, bookLineSpacingOverride,
-          !bookmarkStore.isEmpty(), isCurrentPageStarred, hasPrintedPages),
+          !bookmarkStore.isEmpty(), isCurrentPageStarred, hasPrintedPages,
+          OpdsProgressSync::associated(epub->getPath())),
       [this](const ActivityResult& result) {
         const auto& menu = std::get<MenuResult>(result.data);
         applyOrientation(menu.orientation);
