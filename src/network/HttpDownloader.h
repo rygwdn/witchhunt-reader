@@ -88,6 +88,15 @@ class HttpDownloader {
   static DownloadError fetchUrl(const std::string& url, Stream& stream, const std::string& username = "",
                                 const std::string& password = "", TlsPolicy tls = TlsPolicy::Verified);
 
+  /**
+   * Stream fetch on a reusable session: same contract as the Stream& overload (DownloadError so an
+   * AUTH_ERROR is distinguishable), but the transfer runs on the caller's Session, so back-to-back
+   * calls against one host share a single TLS handshake instead of re-paying it per fetch.
+   */
+  static DownloadError fetchUrl(Session& session, const std::string& url, const DataCallback& onData,
+                                const std::string& username = "", const std::string& password = "",
+                                TlsPolicy tls = TlsPolicy::Verified);
+
   static bool fetchUrl(const std::string& url, const DataCallback& onData, const std::string& username = "",
                        const std::string& password = "");
 

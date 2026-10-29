@@ -37,6 +37,13 @@ struct OpdsEntry {
   // of those downloads.
   std::vector<OpdsAcquisitionLink> acquisitionLinks;
   std::string imageHref;  // Cover image URL (rel="http://opds-spec.org/image"), books only
+  // Inline dashboard fraction (metadata "https://bookorbit.app/ns/readingProgress"), -1 when absent.
+  int progressPercent = -1;
+  // JSON catalog browsing metadata: the group shelf a publication sits under, and its series
+  // ("Name #position") with the link to that series' feed.
+  std::string groupTitle;
+  std::string seriesTitle;
+  std::string seriesHref;
 };
 
 // Legacy alias for backward compatibility

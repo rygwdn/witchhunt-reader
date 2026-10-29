@@ -11,6 +11,7 @@
 #include "../ListController.h"
 #include "OpdsBackTo.h"
 #include "OpdsServerStore.h"
+#include "network/HttpDownloader.h"
 
 /**
  * Activity for browsing and downloading books from an OPDS server.
@@ -56,6 +57,13 @@ class OpdsBookBrowserActivity final : public Activity {
   std::string searchTemplate;
   bool memoryTrimmed = false;
   bool coverAvailable = false;
+  // The fetched feed is OPDS 2 JSON (body starts '{') rather than Atom; rows render richer and
+  // taller, and the discovery cache does not apply.
+  bool jsonFeed = false;
+  // One HTTP+TLS session reused across this browsing session's feed, cover and download requests.
+  std::unique_ptr<HttpDownloader::Session> httpSession;
+  // Page whose cover thumbnails were prepared last, so scrolling back re-downloads nothing.
+  int coverPreparedPage = -1;
   int selectorIndex = 0;
   int selectedBookIndex = -1;
   int formatSelectorIndex = 0;
@@ -94,6 +102,8 @@ class OpdsBookBrowserActivity final : public Activity {
   void launchSearch();
   void performSearch(const std::string& query);
   void fetchCoverForEntry(const OpdsEntry& entry);
+  // Downloads and converts the cover thumbnails of the visible JSON-catalog page, once per page.
+  void prepareCoverPage();
   bool preventAutoSleep() override;
 
   int catalogRowsPerPage() const;
